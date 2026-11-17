@@ -1,0 +1,12 @@
+_upstream_sidebery/
+node_modules/
+addon/
+dist/
+.cache/
+.vite/
+coverage/
+.DS_Store
+.vscode/
+.idea/
+.agents/
+skills-lock.json
