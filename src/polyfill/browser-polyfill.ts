@@ -45,15 +45,24 @@ function createEventEmitter<T extends (...args: any[]) => any>(): EventEmitter<T
 
 function wrapChromeEvent<T extends (...args: any[]) => any>(chromeEvent: any): browser.EventTarget<T> {
   if (chromeEvent && typeof chromeEvent.addListener === 'function') {
+    const rawAdd = chromeEvent.addListener.bind(chromeEvent)
+    const rawRemove =
+      typeof chromeEvent.removeListener === 'function'
+        ? chromeEvent.removeListener.bind(chromeEvent)
+        : () => {}
+    const rawHas =
+      typeof chromeEvent.hasListener === 'function'
+        ? chromeEvent.hasListener.bind(chromeEvent)
+        : () => false
     return {
       addListener(listener: T) {
-        chromeEvent.addListener(listener)
+        rawAdd(listener)
       },
       removeListener(listener: T) {
-        chromeEvent.removeListener(listener)
+        rawRemove(listener)
       },
       hasListener(listener: T) {
-        return typeof chromeEvent.hasListener === 'function' ? chromeEvent.hasListener(listener) : false
+        return rawHas(listener)
       },
     }
   }
@@ -288,16 +297,19 @@ function buildPolyfillNamespaces() {
   const WINDOW_ID_NONE: number = chromeApi?.windows?.WINDOW_ID_NONE ?? -1
   const WINDOW_ID_CURRENT: number = chromeApi?.windows?.WINDOW_ID_CURRENT ?? -2
   const TAB_ID_NONE: number = chromeApi?.tabs?.TAB_ID_NONE ?? -1
+  const lastActiveTabByWindow = new Map<ID, ID>()
 
   function enrichTab(raw: any): browser.tabs.Tab {
     const id: ID = raw?.id ?? TAB_ID_NONE
+    const windowId: ID = raw?.windowId ?? WINDOW_ID_NONE
+    const active = Boolean(raw?.active)
     const incognito = Boolean(raw?.incognito)
     return {
       ...raw,
       id,
       index: raw?.index ?? 0,
-      windowId: raw?.windowId ?? WINDOW_ID_NONE,
-      active: Boolean(raw?.active),
+      windowId,
+      active,
       highlighted: Boolean(raw?.highlighted),
       pinned: Boolean(raw?.pinned),
       incognito,
@@ -553,6 +565,60 @@ function buildPolyfillNamespaces() {
   }
 
   const tabsCreatedListeners = new Map<browser.tabs.CreatedListener, any>()
+  const tabsActivatedListeners = new Map<browser.tabs.ActivatedListener, any>()
+  const rawTabsOnCreatedAdd =
+    typeof tabsOnCreatedRaw?.addListener === 'function'
+      ? tabsOnCreatedRaw.addListener.bind(tabsOnCreatedRaw)
+      : undefined
+  const rawTabsOnCreatedRemove =
+    typeof tabsOnCreatedRaw?.removeListener === 'function'
+      ? tabsOnCreatedRaw.removeListener.bind(tabsOnCreatedRaw)
+      : undefined
+  const rawTabsOnRemoved = chromeApi?.tabs?.onRemoved
+  const rawTabsOnRemovedAdd =
+    typeof rawTabsOnRemoved?.addListener === 'function'
+      ? rawTabsOnRemoved.addListener.bind(rawTabsOnRemoved)
+      : undefined
+  const rawTabsOnRemovedRemove =
+    typeof rawTabsOnRemoved?.removeListener === 'function'
+      ? rawTabsOnRemoved.removeListener.bind(rawTabsOnRemoved)
+      : undefined
+  const rawTabsOnUpdated = chromeApi?.tabs?.onUpdated
+  const rawTabsOnUpdatedAdd =
+    typeof rawTabsOnUpdated?.addListener === 'function'
+      ? rawTabsOnUpdated.addListener.bind(rawTabsOnUpdated)
+      : undefined
+  const rawTabsOnUpdatedRemove =
+    typeof rawTabsOnUpdated?.removeListener === 'function'
+      ? rawTabsOnUpdated.removeListener.bind(rawTabsOnUpdated)
+      : undefined
+  const rawTabsOnActivated = chromeApi?.tabs?.onActivated
+  const rawTabsOnActivatedAdd =
+    typeof rawTabsOnActivated?.addListener === 'function'
+      ? rawTabsOnActivated.addListener.bind(rawTabsOnActivated)
+      : undefined
+  const rawTabsOnActivatedRemove =
+    typeof rawTabsOnActivated?.removeListener === 'function'
+      ? rawTabsOnActivated.removeListener.bind(rawTabsOnActivated)
+      : undefined
+  const rawTabsQuery =
+    typeof chromeApi?.tabs?.query === 'function'
+      ? chromeApi.tabs.query.bind(chromeApi.tabs)
+      : undefined
+
+  function emitTabActivated(tabId: ID, windowId: ID, explicitPrevTabId?: ID): void {
+    const previousTabId =
+      explicitPrevTabId ?? lastActiveTabByWindow.get(windowId) ?? TAB_ID_NONE
+    if (lastActiveTabByWindow.get(windowId) === tabId) return
+    lastActiveTabByWindow.set(windowId, tabId)
+    for (const listener of Array.from(tabsActivatedListeners.keys())) {
+      try {
+        listener({ tabId, windowId, previousTabId })
+      } catch {
+        // Isolate listener errors
+      }
+    }
+  }
 
   const tabs = {
     TAB_ID_NONE,
@@ -830,15 +896,15 @@ function buildPolyfillNamespaces() {
 
     onCreated: {
       addListener(listener: browser.tabs.CreatedListener) {
-        if (!tabsOnCreatedRaw) return
+        if (!rawTabsOnCreatedAdd) return
         const wrapped = (rawTab: any) => listener(enrichTab(rawTab))
         tabsCreatedListeners.set(listener, wrapped)
-        tabsOnCreatedRaw.addListener(wrapped)
+        rawTabsOnCreatedAdd(wrapped)
       },
       removeListener(listener: browser.tabs.CreatedListener) {
         const wrapped = tabsCreatedListeners.get(listener)
-        if (wrapped && tabsOnCreatedRaw) {
-          tabsOnCreatedRaw.removeListener(wrapped)
+        if (wrapped && rawTabsOnCreatedRemove) {
+          rawTabsOnCreatedRemove(wrapped)
           tabsCreatedListeners.delete(listener)
         }
       },
@@ -846,12 +912,66 @@ function buildPolyfillNamespaces() {
         return tabsCreatedListeners.has(listener)
       },
     },
-    onRemoved: wrapChromeEvent<browser.tabs.RemovedListener>(chromeApi?.tabs?.onRemoved),
+    onRemoved: (() => {
+      const removedListeners = new Map<browser.tabs.RemovedListener, any>()
+      return {
+        addListener(listener: browser.tabs.RemovedListener) {
+          if (!rawTabsOnRemovedAdd) return
+          const wrapped = (tabId: number, removeInfo: browser.tabs.RemoveInfo) => {
+            const winId = removeInfo?.windowId
+            if (winId !== undefined && lastActiveTabByWindow.get(winId) === tabId) {
+              lastActiveTabByWindow.delete(winId)
+            }
+            listener(tabId, removeInfo)
+            if (!removeInfo?.isWindowClosing && winId !== undefined && rawTabsQuery) {
+              const checkNewActive = () => {
+                rawTabsQuery({ windowId: winId, active: true })
+                  .then((activeTabs: any[]) => {
+                    const act = activeTabs?.[0]
+                    if (
+                      act &&
+                      act.id !== undefined &&
+                      act.id !== tabId &&
+                      lastActiveTabByWindow.get(winId) !== act.id
+                    ) {
+                      emitTabActivated(act.id, winId, tabId)
+                    }
+                  })
+                  .catch(() => {})
+              }
+              checkNewActive()
+              setTimeout(checkNewActive, 40)
+              setTimeout(checkNewActive, 120)
+            }
+          }
+          removedListeners.set(listener, wrapped)
+          rawTabsOnRemovedAdd(wrapped)
+        },
+        removeListener(listener: browser.tabs.RemovedListener) {
+          const wrapped = removedListeners.get(listener)
+          if (wrapped && rawTabsOnRemovedRemove) {
+            rawTabsOnRemovedRemove(wrapped)
+            removedListeners.delete(listener)
+          }
+        },
+        hasListener(listener: browser.tabs.RemovedListener) {
+          return removedListeners.has(listener)
+        },
+      }
+    })(),
     onUpdated: {
       addListener(listener: browser.tabs.UpdatedListener, extraParameters?: browser.tabs.ExtraParameters) {
         tabUpdatedSyntheticSet.set(listener, extraParameters)
-        if (!chromeApi?.tabs?.onUpdated) return
+        if (!rawTabsOnUpdatedAdd) return
         const wrapped = (tabId: number, changeInfo: browser.tabs.ChangeInfo, rawTab: any) => {
+          if (
+            rawTab?.active &&
+            rawTab.id !== undefined &&
+            rawTab.windowId !== undefined &&
+            lastActiveTabByWindow.get(rawTab.windowId) !== rawTab.id
+          ) {
+            emitTabActivated(rawTab.id, rawTab.windowId)
+          }
           if (extraParameters?.tabId !== undefined && extraParameters.tabId !== tabId) return
           if (extraParameters?.windowId !== undefined && extraParameters.windowId !== rawTab?.windowId) {
             return
@@ -865,13 +985,13 @@ function buildPolyfillNamespaces() {
           listener(tabId, changeInfo, enrichTab(rawTab))
         }
         tabUpdatedMap.set(listener, { wrapped, extra: extraParameters })
-        chromeApi.tabs.onUpdated.addListener(wrapped)
+        rawTabsOnUpdatedAdd(wrapped)
       },
       removeListener(listener: browser.tabs.UpdatedListener) {
         tabUpdatedSyntheticSet.delete(listener)
         const entry = tabUpdatedMap.get(listener)
-        if (entry && chromeApi?.tabs?.onUpdated) {
-          chromeApi.tabs.onUpdated.removeListener(entry.wrapped)
+        if (entry && rawTabsOnUpdatedRemove) {
+          rawTabsOnUpdatedRemove(entry.wrapped)
           tabUpdatedMap.delete(listener)
         }
       },
@@ -879,7 +999,35 @@ function buildPolyfillNamespaces() {
         return tabUpdatedMap.has(listener) || tabUpdatedSyntheticSet.has(listener)
       },
     },
-    onActivated: wrapChromeEvent<browser.tabs.ActivatedListener>(chromeApi?.tabs?.onActivated),
+    onActivated: {
+      addListener(listener: browser.tabs.ActivatedListener) {
+        if (!rawTabsOnActivatedAdd) return
+        const wrapped = (info: any) => {
+          const winId = info?.windowId ?? WINDOW_ID_NONE
+          const tabId = info?.tabId ?? TAB_ID_NONE
+          const previousTabId =
+            info?.previousTabId !== undefined
+              ? info.previousTabId
+              : (lastActiveTabByWindow.get(winId) ?? TAB_ID_NONE)
+          if (winId !== WINDOW_ID_NONE && tabId !== TAB_ID_NONE) {
+            lastActiveTabByWindow.set(winId, tabId)
+          }
+          listener({ tabId, windowId: winId, previousTabId })
+        }
+        tabsActivatedListeners.set(listener, wrapped)
+        rawTabsOnActivatedAdd(wrapped)
+      },
+      removeListener(listener: browser.tabs.ActivatedListener) {
+        const wrapped = tabsActivatedListeners.get(listener)
+        if (wrapped && rawTabsOnActivatedRemove) {
+          rawTabsOnActivatedRemove(wrapped)
+          tabsActivatedListeners.delete(listener)
+        }
+      },
+      hasListener(listener: browser.tabs.ActivatedListener) {
+        return tabsActivatedListeners.has(listener)
+      },
+    },
     onMoved: wrapChromeEvent<browser.tabs.MovedListener>(chromeApi?.tabs?.onMoved),
     onAttached: wrapChromeEvent<browser.tabs.AttachedListener>(chromeApi?.tabs?.onAttached),
     onDetached: wrapChromeEvent<browser.tabs.DetachListener>(chromeApi?.tabs?.onDetached),
@@ -1987,6 +2135,7 @@ export function installBrowserPolyfill(force = false): void {
   // locked-down/non-configurable `window.browser` in Vivaldi <webview> cannot bypass it)
   g.__sideberyBrowser = namespaces
 
+  let replacedGlobalBrowser = false
   // Always replace Chrome's native `globalThis.browser` (which aliases `chrome` in Chromium 126+)
   // so Firefox-specific wrappers (tabs.onUpdated filters, permissions.contains('tabHide'), etc.)
   // are active across all contexts.
@@ -1998,8 +2147,11 @@ export function installBrowserPolyfill(force = false): void {
   ) {
     try {
       g.browser = namespaces
-      return
+      replacedGlobalBrowser = g.browser === namespaces
     } catch {
+      // Ignore setter errors and try defineProperty next
+    }
+    if (!replacedGlobalBrowser) {
       try {
         Object.defineProperty(g, 'browser', {
           value: namespaces,
@@ -2007,24 +2159,84 @@ export function installBrowserPolyfill(force = false): void {
           configurable: true,
           enumerable: true,
         })
-        return
+        replacedGlobalBrowser = g.browser === namespaces
       } catch {
         // Fall through to in-place overwrite on `existing`
       }
     }
   }
+  if (replacedGlobalBrowser) return
 
   // Overwrite polyfill namespaces/methods on existing object if `g.browser` is non-configurable
+  const targetBrowser = g.browser ?? existing
+  if (!targetBrowser || typeof targetBrowser !== 'object') return
+
   for (const [nsKey, nsVal] of Object.entries(namespaces)) {
+    let replacedNs = false
     try {
-      existing[nsKey] = nsVal
+      targetBrowser[nsKey] = nsVal
+      replacedNs = targetBrowser[nsKey] === nsVal
     } catch {
-      if (nsVal && typeof nsVal === 'object' && typeof existing[nsKey] === 'object') {
-        for (const [propKey, propVal] of Object.entries(nsVal as Record<string, any>)) {
+      // Ignore
+    }
+    if (!replacedNs) {
+      try {
+        Object.defineProperty(targetBrowser, nsKey, {
+          value: nsVal,
+          writable: true,
+          configurable: true,
+          enumerable: true,
+        })
+        replacedNs = targetBrowser[nsKey] === nsVal
+      } catch {
+        // Ignore
+      }
+    }
+    if (!replacedNs && nsVal && typeof nsVal === 'object' && typeof targetBrowser[nsKey] === 'object') {
+      const targetNs = targetBrowser[nsKey]
+      for (const [propKey, propVal] of Object.entries(nsVal as Record<string, any>)) {
+        let replacedProp = false
+        try {
+          targetNs[propKey] = propVal
+          replacedProp = targetNs[propKey] === propVal
+        } catch {
+          // Ignore
+        }
+        if (!replacedProp) {
           try {
-            existing[nsKey][propKey] = propVal
+            Object.defineProperty(targetNs, propKey, {
+              value: propVal,
+              writable: true,
+              configurable: true,
+              enumerable: true,
+            })
+            replacedProp = targetNs[propKey] === propVal
           } catch {
-            // Ignore non-writable property
+            // Ignore
+          }
+        }
+        if (
+          !replacedProp &&
+          propVal &&
+          typeof propVal === 'object' &&
+          typeof targetNs[propKey] === 'object'
+        ) {
+          const targetProp = targetNs[propKey]
+          for (const [subKey, subVal] of Object.entries(propVal as Record<string, any>)) {
+            try {
+              targetProp[subKey] = subVal
+            } catch {
+              try {
+                Object.defineProperty(targetProp, subKey, {
+                  value: subVal,
+                  writable: true,
+                  configurable: true,
+                  enumerable: true,
+                })
+              } catch {
+                // Ignore non-writable property
+              }
+            }
           }
         }
       }

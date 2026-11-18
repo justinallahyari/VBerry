@@ -605,6 +605,8 @@ function updateHighlightedTabs(delay = 250): void {
       conf.tabs.push(tab.index)
     }
 
+    if (!conf.tabs.length) return
+
     browser.tabs.highlight(conf).catch(() => {
       // If tab already removed...
     })

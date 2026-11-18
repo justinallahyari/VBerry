@@ -406,6 +406,21 @@ async function restoreTabsState(src?: LoadSrc, ignoreLockedTabs?: boolean): Prom
             if (!cached.customColor && anchored.customColor) {
               cached.customColor = anchored.customColor
             }
+          } else if (!cached && anchored) {
+            tabsCache[nt.id] = {
+              id: anchored.id ?? nt.id,
+              url: nt.url,
+              pin: nt.pinned,
+              parentId: anchored.parentId,
+              panelId: anchored.panelId,
+              folded: anchored.folded,
+              ctx: anchored.containerId,
+              containerId: anchored.containerId,
+              customTitle: anchored.customTitle,
+              customColor: anchored.customColor,
+              originalUrl: anchored.originalUrl,
+              lvl: anchored.lvl,
+            }
           }
         }
       } catch (err) {
@@ -589,8 +604,6 @@ function restoreTab(
     if (props.originalUrl) {
       mv3Tab.originalUrl = props.originalUrl
     }
-  } else {
-    Logs.warn(`Tabs.restoreTab: no props for: "${tab.id} i${tab.index} url${tab.url}"`)
   }
 
   // Use openerTabId as fallback for parentId
@@ -610,7 +623,9 @@ function restoreTab(
     }
   } else {
     // Panel is not found
-    Logs.warn(`Tabs.restoreTab: cannot find panel: "${props?.panelId}"; tab index: ${tab.index}`)
+    if (props?.panelId !== undefined && props.panelId !== D.NOID) {
+      Logs.warn(`Tabs.restoreTab: cannot find panel: "${props.panelId}"; tab index: ${tab.index}`)
+    }
     const parentTab = Tabs.byId[tab.parentId]
     if (!props && parentTab && parentTab.index < tab.index) {
       // Append unknown (new) tabs to the panel of parent tab

@@ -694,6 +694,45 @@ describe('Sidebery Chrome MV3 Integration & Lossless Compatibility', () => {
         browser.tabs.onUpdated.addListener(listener, { properties: ['url'] })
       ).not.toThrow()
       browser.tabs.onUpdated.removeListener(listener)
+
+      // Also simulate a locked/getter-only globalThis.browser with getter-only tabs & onUpdated
+      const lockedOnUpdated = Object.create(null)
+      Object.defineProperty(lockedOnUpdated, 'addListener', {
+        value: g.chrome.tabs.onUpdated.addListener,
+        writable: false,
+        configurable: true,
+        enumerable: true,
+      })
+      Object.defineProperty(lockedOnUpdated, 'removeListener', {
+        value: g.chrome.tabs.onUpdated.removeListener,
+        writable: false,
+        configurable: true,
+        enumerable: true,
+      })
+      const lockedTabs = Object.create(null)
+      Object.defineProperty(lockedTabs, 'onUpdated', {
+        get: () => lockedOnUpdated,
+        configurable: false,
+        enumerable: true,
+      })
+      const lockedBrowser = Object.create(null)
+      Object.defineProperty(lockedBrowser, 'tabs', {
+        get: () => lockedTabs,
+        configurable: false,
+        enumerable: true,
+      })
+      Object.defineProperty(g, 'browser', {
+        get: () => lockedBrowser,
+        set: () => {},
+        configurable: true,
+        enumerable: true,
+      })
+
+      installBrowserPolyfill(true)
+      expect(() =>
+        g.browser.tabs.onUpdated.addListener(listener, { properties: ['url'] })
+      ).not.toThrow()
+      g.browser.tabs.onUpdated.removeListener(listener)
     } finally {
       g.chrome.permissions.contains = origPermContains
       g.chrome.tabs.onUpdated.addListener = origOnUpdatedAdd
@@ -905,5 +944,42 @@ describe('Sidebery Chrome MV3 Integration & Lossless Compatibility', () => {
     expect(TabsBg.byId[tab2.id]).toBeUndefined()
     const bgWinTabs = WindowsBg.byId.get(win.id!)?.tabs ?? []
     expect(bgWinTabs.some(t => t.id === tab2.id)).toBe(false)
+  })
+
+  test('Highlights newly focused tab when active tab is closed even if browser skips native onActivated event', async () => {
+    const env = getEnv()
+    const win = await browser.windows.create({ url: 'https://first.example.com' })
+    const tab1 = win.tabs![0]
+    const tab2 = await browser.tabs.create({
+      windowId: win.id,
+      url: 'https://second.example.com',
+      active: true,
+    })
+
+    const activatedEvents: browser.tabs.ActiveInfo[] = []
+    const listener = (info: browser.tabs.ActiveInfo) => {
+      activatedEvents.push(info)
+    }
+    browser.tabs.onActivated.addListener(listener)
+
+    try {
+      // Simulate Vivaldi/browser closing the focused tab (tab2) and switching to tab1
+      // WITHOUT emitting chrome.tabs.onActivated
+      const rawTab2Idx = env.tabs.findIndex((t: any) => t.id === tab2.id)
+      if (rawTab2Idx !== -1) env.tabs.splice(rawTab2Idx, 1)
+      const rawTab1 = env.tabs.find((t: any) => t.id === tab1.id)
+      if (rawTab1) rawTab1.active = true
+
+      ;(globalThis as any).chrome.tabs.onRemoved.emit(tab2.id, {
+        windowId: win.id,
+        isWindowClosing: false,
+      })
+
+      await new Promise(r => setTimeout(r, 10))
+
+      expect(activatedEvents.some(e => e.tabId === tab1.id && e.windowId === win.id)).toBe(true)
+    } finally {
+      browser.tabs.onActivated.removeListener(listener)
+    }
   })
 })

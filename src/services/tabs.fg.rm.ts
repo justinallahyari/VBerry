@@ -321,10 +321,9 @@ export async function removeTabs(
   // Update successorTabId if there is an active tab
   if (activeTab) {
     const successor = Tabs.updateSuccessionDebounced(0)
-    // Activate tab, since Firefox ignores the succession if there are
-    // highlighted tabs
-    if (Settings.state.nativeHighlight && successor) {
-      await browser.tabs.update(successor.id, { active: true })
+    // Chrome does not support browser.tabs.moveInSuccession, so always activate the successor
+    if (successor) {
+      await browser.tabs.update(successor.id, { active: true }).catch(() => undefined)
     }
   }
 

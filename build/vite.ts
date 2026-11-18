@@ -1,3 +1,4 @@
+import fs from 'node:fs'
 import path from 'node:path'
 import { build, defineConfig, mergeConfig, type Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
@@ -89,6 +90,15 @@ const base = defineConfig({
 
 async function main() {
   log('Scripts: Building')
+  try {
+    for (const file of fs.readdirSync(ADDON_PATH)) {
+      if (file.startsWith('chunk-') && file.endsWith('.js')) {
+        fs.rmSync(path.join(ADDON_PATH, file), { force: true })
+      }
+    }
+  } catch {
+    // Ignore if addon directory doesn't exist yet
+  }
   let firstBuild = true
 
   const buildTasks = []

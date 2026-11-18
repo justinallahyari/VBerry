@@ -1,4 +1,4 @@
-import { Reactivator, Window, WindowChooseOption, WindowChoosingDetails } from 'src/types'
+import { Reactivator, Stored, Window, WindowChooseOption, WindowChoosingDetails } from 'src/types'
 import { NOID } from 'src/defaults'
 import * as Preview from 'src/services/tabs.fg.preview'
 import * as Utils from 'src/utils'
@@ -39,14 +39,9 @@ export function setCurrentId(newId: ID) {
 }
 
 export async function load(): Promise<void> {
-  const winData = await Promise.all([
-    browser.windows.getCurrent({ populate: false }),
-    typeof browser.sessions?.getWindowValue === 'function'
-      ? browser.sessions.getWindowValue<string>(browser.windows.WINDOW_ID_CURRENT, 'uniqWinId')
-      : Promise.resolve(undefined),
-  ])
-  const currentWindow = winData[0]
-  uniqWinId = winData[1] ?? NOID
+  const currentWindow = await browser.windows.getCurrent({ populate: false })
+  const winId = currentWindow.id ?? NOID
+  const sessionWinId = winId !== NOID ? winId : browser.windows.WINDOW_ID_CURRENT
 
   // Workaround for https://bugzilla.mozilla.org/show_bug.cgi?id=1660564
   if (Info.isSidebar && currentWindow.type && currentWindow.type !== 'normal') {
@@ -54,24 +49,53 @@ export async function load(): Promise<void> {
     throw `1660564`
   }
 
-  // Generate unique window id
+  let hasWinSessionVal = false
+  if (typeof browser.sessions?.getWindowValue === 'function') {
+    const directVal = await browser.sessions
+      .getWindowValue<string>(sessionWinId, 'uniqWinId')
+      .catch(() => undefined)
+    if (directVal) {
+      uniqWinId = directVal
+      hasWinSessionVal = true
+    } else if (winId !== NOID) {
+      uniqWinId =
+        (await browser.sessions
+          .getWindowValue<string>(browser.windows.WINDOW_ID_CURRENT, 'uniqWinId')
+          .catch(() => undefined)) ?? NOID
+    } else {
+      uniqWinId = NOID
+    }
+  } else {
+    uniqWinId = NOID
+  }
+
+  const windows = await browser.windows.getAll().catch(() => [])
+  otherWindows = windows
+    .filter(w => w.id !== winId && w.type === 'normal')
+    .map(w => ({ id: w.id ?? NOID, incognito: w.incognito, title: w.title ?? '' }))
+
+  // Recover cached uniqWinId or generate unique window id
   if (uniqWinId === NOID) {
-    uniqWinId = Utils.uid()
-    browser.sessions
-      ?.setWindowValue?.(browser.windows.WINDOW_ID_CURRENT, 'uniqWinId', uniqWinId)
-      ?.catch(() => {})
+    if (!currentWindow.incognito && otherWindows.filter(w => !w.incognito).length === 0) {
+      const storage = await browser.storage.local
+        .get<Stored>('tabsDataCache')
+        .catch(() => undefined)
+      const cachedUniqWinId =
+        storage?.tabsDataCache?.length === 1 ? storage.tabsDataCache[0]?.[0]?.uniqWinId : undefined
+      if (cachedUniqWinId) uniqWinId = cachedUniqWinId
+    }
+    if (uniqWinId === NOID) uniqWinId = Utils.uid()
+  }
+
+  if (!hasWinSessionVal && uniqWinId !== NOID) {
+    browser.sessions?.setWindowValue?.(sessionWinId, 'uniqWinId', uniqWinId)?.catch(() => {})
   }
 
   incognito = currentWindow.incognito
-  id = currentWindow.id ?? NOID
+  id = winId
   focused = currentWindow.focused
   if (focused && currentWindow.id) lastFocusedId = currentWindow.id
   lastFocused = currentWindow.focused
-  browser.windows.getAll().then(windows => {
-    otherWindows = windows
-      .filter(w => w.id !== id && w.type === 'normal')
-      .map(w => ({ id: w.id ?? NOID, incognito: w.incognito, title: w.title ?? '' }))
-  })
 }
 
 export async function showWindowsPopup(config: WindowChoosingDetails = {}): Promise<ID> {

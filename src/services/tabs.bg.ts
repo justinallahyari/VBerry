@@ -177,9 +177,7 @@ function mutateNativeTabToSideberyTab(nativeTab: T.NativeTab): T.BgTab {
 export function setupListeners(): void {
   browser.tabs.onCreated.addListener(onTabCreated)
   browser.tabs.onRemoved.addListener(onTabRemoved)
-  browser.tabs.onUpdated.addListener(onTabUpdated, {
-    properties: ['pinned', 'title', 'status', 'favIconUrl', 'url', 'hidden', 'discarded'],
-  })
+  browser.tabs.onUpdated.addListener(onTabUpdated)
   browser.tabs.onActivated.addListener(onTabActivated)
   browser.tabs.onMoved.addListener(onTabMoved)
   browser.tabs.onAttached.addListener(onTabAttached)

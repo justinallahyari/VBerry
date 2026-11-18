@@ -31,17 +31,8 @@ export let listenersAreSet = false
 export function setupTabsListeners(): void {
   if (!Sidebar.hasTabs) return
 
-  // prettier-ignore
-  const updProps: browser.tabs.UpdateProp[] = [
-    'audible', 'discarded', 'favIconUrl', 'splitViewId', 'hidden',
-    'mutedInfo', 'pinned', 'status', 'title', 'url',
-  ]
-  if (Info.ffVersionLowerThan('149')) {
-    Utils.rmFromArray(updProps, 'splitViewId')
-  }
-
   browser.tabs.onCreated.addListener(onTabCreated)
-  browser.tabs.onUpdated.addListener(onTabUpdated, { properties: updProps })
+  browser.tabs.onUpdated.addListener(onTabUpdated)
   browser.tabs.onRemoved.addListener(onTabRemoved)
   browser.tabs.onMoved.addListener(onTabMoved)
   browser.tabs.onDetached.addListener(onTabDetached)
@@ -1035,6 +1026,19 @@ function onTabUpdated(tabId: ID, change: browser.tabs.ChangeInfo, nativeTab: Nat
   // Update tab object
   Object.assign(tab, change)
 
+  if (
+    nativeTab?.active &&
+    !tab.removing &&
+    !Tabs.removingTabs.includes(tabId) &&
+    (Tabs.activeId !== tabId || !tab.reactive.active)
+  ) {
+    onTabActivated({
+      tabId,
+      windowId: Windows.id,
+      previousTabId: Tabs.activeId,
+    })
+  }
+
   if (change.url !== undefined || change.title !== undefined) {
     Tabs.saveTabData(tabId, true, 300)
   }
@@ -1203,10 +1207,6 @@ async function onTabReplaced(addedTabId: ID, removedTabId: ID): Promise<void> {
   const tab = Tabs.byId[removedTabId]
   if (!tab) return
 
-  const nativeTab = await browser.tabs.get(addedTabId).catch(() => undefined)
-  // Re-check after async get in case another handler already updated it
-  if (!Tabs.byId[removedTabId]) return
-
   delete Tabs.byId[removedTabId]
   tab.id = addedTabId
   Tabs.byId[addedTabId] = tab
@@ -1228,6 +1228,19 @@ async function onTabReplaced(addedTabId: ID, removedTabId: ID): Promise<void> {
 
   Sidebar.recalcTabsPanels()
   Sidebar.recalcVisibleTabs(tab.panelId)
+
+  const nativeTab = await browser.tabs.get(addedTabId).catch(() => undefined)
+  if (Tabs.byId[addedTabId] !== tab) return
+
+  if (Tabs.activeId === addedTabId || nativeTab?.active) {
+    if (!tab.reactive.active || Tabs.activeId !== addedTabId) {
+      onTabActivated({
+        tabId: addedTabId,
+        windowId: Windows.id,
+        previousTabId: removedTabId,
+      })
+    }
+  }
 
   const change: browser.tabs.ChangeInfo = {
     discarded: nativeTab?.discarded ?? true,
@@ -1296,6 +1309,7 @@ function onTabRemoved(tabId: ID, info: browser.tabs.RemoveInfo, detached?: boole
     Logs.warn(`Tabs.onTabRemoved: Cannot find tab: ${tabId}`)
     return Tabs.reinitTabs()
   }
+  const wasActive = tab.active || tab.reactive.active || Tabs.activeId === tabId
   if (Tabs.list[tab.index]?.id !== tabId) {
     const actualIdx = Tabs.list.findIndex(t => t?.id === tabId)
     if (actualIdx !== -1) tab.index = actualIdx
@@ -1580,7 +1594,38 @@ function onTabRemoved(tabId: ID, info: browser.tabs.RemoveInfo, detached?: boole
 
   if (!info.isWindowClosing && !detached) {
     void TabTreeAnchor.removeTabAnchor(tabId).catch(() => undefined)
+    if (!Tabs.removingTabs.length && (wasActive || !Tabs.byId[Tabs.activeId]?.reactive.active)) {
+      syncActiveTabAfterRemove(tabId)
+    }
   }
+}
+
+let syncActiveAfterRmTimeout: number | undefined
+function syncActiveTabAfterRemove(removedTabId: ID): void {
+  const check = async (): Promise<void> => {
+    let activeTabs = await browser.tabs
+      .query({ windowId: Windows.id, active: true })
+      .catch(() => [] as NativeTab[])
+    let match = activeTabs.find(t => t && t.id !== removedTabId && Tabs.byId[t.id])
+    if (!match) {
+      activeTabs = await browser.tabs.query({ active: true }).catch(() => [] as NativeTab[])
+      match = activeTabs.find(t => t && t.id !== removedTabId && Tabs.byId[t.id])
+    }
+    const target = match ? Tabs.byId[match.id] : undefined
+    if (target && (Tabs.activeId !== target.id || !target.reactive.active)) {
+      onTabActivated({
+        tabId: target.id,
+        windowId: Windows.id,
+        previousTabId: removedTabId,
+      })
+    }
+  }
+
+  void check()
+  clearTimeout(syncActiveAfterRmTimeout)
+  syncActiveAfterRmTimeout = setTimeout(() => {
+    void check()
+  }, 60)
 }
 
 let _ignoreMoveEvents = false
@@ -1836,6 +1881,10 @@ async function onTabAttached(id: ID, info: browser.tabs.AttachInfo): Promise<voi
     Tabs.updateNativeTabsVisibility()
   }
 
+  if (deferredActivationHandling.id === id && deferredActivationHandling.cb) {
+    deferredActivationHandling.cb()
+    deferredActivationHandling.cb = null
+  }
   deferredActivationHandling.id = D.NOID
 }
 
@@ -1845,7 +1894,7 @@ let bufTabActivatedEventIndex = -1
  * Tabs.onActivated
  */
 function onTabActivated(info: browser.tabs.ActiveInfo): void {
-  if (info.windowId !== Windows.id) return
+  if (info.windowId !== Windows.id && !Tabs.byId[info.tabId]) return
   if (!Tabs.ready || waitForOtherReopenedTabsBuffer) {
     if (bufTabActivatedEventIndex !== -1) {
       Tabs.deferredEventHandling.splice(bufTabActivatedEventIndex, 1)
@@ -1879,8 +1928,10 @@ function onTabActivated(info: browser.tabs.ActiveInfo): void {
   const ts = Date.now()
 
   // Update previous active tab and store its id
-  const prevActive = Tabs.byId[Tabs.activeId]
-  if (prevActive) {
+  const prevActive =
+    Tabs.byId[Tabs.activeId] ??
+    (info.previousTabId !== undefined ? Tabs.byId[info.previousTabId] : undefined)
+  if (prevActive && prevActive.id !== tab.id) {
     prevActive.reactive.active = prevActive.active = false
     Tabs.writeActiveTabsHistory(prevActive, tab)
     prevActive.lastActivity = ts
@@ -1893,6 +1944,11 @@ function onTabActivated(info: browser.tabs.ActiveInfo): void {
       browser.tabs.hide?.(prevActive.id).catch(err => {
         Logs.err('Tabs.onTabActivated: Cannot hide prev active tab', err)
       })
+    }
+  }
+  for (const t of Tabs.list) {
+    if (t.id !== tab.id && (t.active || t.reactive.active)) {
+      t.reactive.active = t.active = false
     }
   }
 
