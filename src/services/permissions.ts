@@ -43,17 +43,19 @@ export function reactivate(r: Reactivator<PermissionsState>) {
  * Retrieve current permissions
  */
 export async function load(): Promise<void> {
+  const safeContains = (p: browser.permissions.Permissions) =>
+    browser.permissions.contains(p).catch(() => false)
   const perms = await Promise.all([
-    browser.permissions.contains({ origins: ['<all_urls>'] }),
-    browser.permissions.contains({ permissions: ['webRequest'] }),
-    browser.permissions.contains({ permissions: ['webRequestBlocking'] }),
-    browser.permissions.contains({ permissions: ['proxy'] }),
-    browser.permissions.contains({ permissions: ['tabHide'] }),
-    browser.permissions.contains({ permissions: ['clipboardWrite'] }),
-    browser.permissions.contains({ permissions: ['clipboardRead'] }),
-    browser.permissions.contains({ permissions: ['history'] }),
-    browser.permissions.contains({ permissions: ['bookmarks'] }),
-    browser.permissions.contains({ permissions: ['downloads'] }),
+    safeContains({ origins: ['<all_urls>'] }),
+    safeContains({ permissions: ['webRequest'] }),
+    safeContains({ permissions: ['webRequestBlocking'] }),
+    safeContains({ permissions: ['proxy'] }),
+    safeContains({ permissions: ['tabHide'] }),
+    safeContains({ permissions: ['clipboardWrite'] }),
+    safeContains({ permissions: ['clipboardRead'] }),
+    safeContains({ permissions: ['history'] }),
+    safeContains({ permissions: ['bookmarks'] }),
+    safeContains({ permissions: ['downloads'] }),
   ])
   allUrls = perms[0]
   webRequest = perms[1]

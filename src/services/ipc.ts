@@ -252,8 +252,11 @@ export function connectTo(
       if (handlers) handlers.forEach(cb => cb(connection.id))
     }
 
-    // Reconnect to background
-    if (toBg && connection.reconnectCount++ < RECON_COUNT) {
+    // Reconnect to background only if there was a port error or pending work;
+    // clean MV3 Service Worker idle disconnects should stay closed until needed.
+    const hasPendingWork =
+      connection.pendingRequests.length > 0 || connection.pendingSendings.length > 0
+    if (toBg && (port.error || hasPendingWork) && connection.reconnectCount++ < RECON_COUNT) {
       clearTimeout(connection.reconnectingTimeout)
       const timeout = INCR_TIMEOUT_STEP * connection.reconnectCount
       Logs.info(`${dbgPrefix} Reconnecting...`, timeout)
@@ -270,9 +273,15 @@ export function connectTo(
 
     // Remove connection
     else {
+      clearTimeout(connection.reconnectingTimeout)
+      const confirmWaiting = msgsWaitingForAnswer.get(conConfirmId)
+      if (confirmWaiting) {
+        clearTimeout(confirmWaiting.timeout)
+        msgsWaitingForAnswer.delete(conConfirmId)
+      }
       resolveUnfinishedCommunications(port)
 
-      Logs.info(`${dbgPrefix} Removing connection`)
+      if (port.error || hasPendingWork) Logs.info(`${dbgPrefix} Removing connection`)
       if (!connection.remotePort) {
         connection.state = ConnectionState.Closed
         removeConnection(dstType, id)
@@ -281,12 +290,8 @@ export function connectTo(
   }
   connection.localPort.onDisconnect.addListener(connection.disconnectListener)
 
-  // Reset reconnection count after RESET_RECON_COUNT_TIMEOUT
+  // Reset reconnection count after RESET_RECON_COUNT_TIMEOUT once confirmed
   clearTimeout(connection.reconnectingTimeout)
-  connection.reconnectingTimeout = setTimeout(() => {
-    // Logs.info(`${dbgPrefix} Reseting reconnection count:`, connection.reconnectCount)
-    connection.reconnectCount = 0
-  }, RESET_RECON_COUNT_TIMEOUT)
 
   // Wait confirmation
   const conConfirmTimeout = CONNECT_CONFIRM_DEADLINE + INCR_TIMEOUT_STEP * connection.reconnectCount
@@ -317,6 +322,9 @@ export function connectTo(
     ok: () => {
       // Logs.info(`IPC.connectTo(${getInstanceName(dstType)}): CONFIRMED`)
       connection.state = ConnectionState.Ready
+      connection.reconnectingTimeout = setTimeout(() => {
+        connection.reconnectCount = 0
+      }, RESET_RECON_COUNT_TIMEOUT)
       if (connectionIsNew) {
         const handlers = connectionHandlers.get(dstType)
         if (handlers) handlers.forEach(cb => cb(connection.id))
@@ -326,6 +334,11 @@ export function connectTo(
         const pending = connection.pendingRequests
         connection.pendingRequests = []
         pending.forEach(pending => pending.request())
+      }
+      if (connection.pendingSendings.length) {
+        const pending = connection.pendingSendings
+        connection.pendingSendings = []
+        pending.forEach(p => p())
       }
     },
   })
@@ -458,10 +471,14 @@ export function send<T extends InstanceType, A extends ActionsKeys<T>>(msg: Mess
   else if (msg.dstType === InstanceType.group && msg.dstTabId !== undefined) id = msg.dstTabId
 
   // Get port
-  const connection = getConnection(msg.dstType, id)
+  let connection = getConnection(msg.dstType, id)
+  if (!connection && msg.dstType === InstanceType.bg) {
+    connectTo(InstanceType.bg)
+    connection = getConnection(msg.dstType, id)
+  }
   const port = getConnectionPortWithoutError(connection)
 
-  if (!port) {
+  if (!port || connection?.state !== ConnectionState.Ready) {
     connection?.pendingSendings.push(() => send(msg))
     return
   }

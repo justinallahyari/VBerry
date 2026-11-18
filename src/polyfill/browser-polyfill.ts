@@ -1646,17 +1646,15 @@ function buildPolyfillNamespaces() {
     return new Promise<void>(resolve => {
       let settled = false
       const done = () => {
+        void chromeApi?.runtime?.lastError
         if (settled) return
         settled = true
-        void chromeApi?.runtime?.lastError
         resolve()
       }
       try {
         const res = chromeApi.contextMenus.removeAll(done)
         if (res && typeof res.then === 'function') {
           res.then(done, done)
-        } else if (chromeApi.contextMenus.removeAll.length === 0) {
-          done()
         }
       } catch {
         done()
@@ -1670,19 +1668,36 @@ function buildPolyfillNamespaces() {
     return new Promise<void>(resolve => {
       let settled = false
       const done = () => {
+        void chromeApi?.runtime?.lastError
         if (settled) return
         settled = true
-        void chromeApi?.runtime?.lastError
         resolve()
+      }
+      const onCreated = () => {
+        const err = chromeApi?.runtime?.lastError
+        if (
+          err?.message?.includes('duplicate id') &&
+          typeof chromeApi?.contextMenus?.update === 'function'
+        ) {
+          try {
+            const { id: _id, ...updateProps } = cleanProps
+            const updRes = chromeApi.contextMenus.update(itemId, updateProps, done)
+            if (updRes && typeof updRes.then === 'function') {
+              updRes.then(done, done)
+            }
+            return
+          } catch {
+            // Fall through to done
+          }
+        }
+        done()
       }
       const doCreate = () => {
         try {
           createdMenuIds.add(itemId)
-          const res = chromeApi.contextMenus.create(cleanProps, done)
+          const res = chromeApi.contextMenus.create(cleanProps, onCreated)
           if (res && typeof res.then === 'function') {
             res.then(done, done)
-          } else if (chromeApi.contextMenus.create.length <= 1) {
-            done()
           }
         } catch {
           done()
@@ -1697,8 +1712,6 @@ function buildPolyfillNamespaces() {
             })
             if (rmRes && typeof rmRes.then === 'function') {
               rmRes.then(doCreate, doCreate)
-            } else if (chromeApi.contextMenus.remove.length <= 1) {
-              doCreate()
             }
             return
           } catch {
@@ -1710,8 +1723,6 @@ function buildPolyfillNamespaces() {
             const updRes = chromeApi.contextMenus.update(itemId, updateProps, done)
             if (updRes && typeof updRes.then === 'function') {
               updRes.then(done, done)
-            } else if (chromeApi.contextMenus.update.length <= 2) {
-              done()
             }
             return
           } catch {

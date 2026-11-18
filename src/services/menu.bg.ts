@@ -3,6 +3,7 @@ import * as SnapshotsBg from 'src/services/snapshots.bg'
 import * as TabsBg from 'src/services/tabs.bg'
 
 export function createBrowserActionMenu() {
+  browser.menus.removeAll()
   createSettingsMenu()
   TabsBg.createOpenFromCacheMenu()
 }

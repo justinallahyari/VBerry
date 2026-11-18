@@ -645,14 +645,14 @@ function onMouseEnter(e: MouseEvent) {
       const successorTabId = tab.successorTabId
       if (successorTabId && Tabs.byId[successorTabId]) {
         browser.tabs
-          .warmup(successorTabId)
-          .catch(err => Logs.err('Tab.onMouseEnter: Warmup successor tab', err))
+          .warmup?.(successorTabId)
+          ?.catch(err => Logs.err('Tab.onMouseEnter: Warmup successor tab', err))
       }
     } else {
       /// warmup hovered tab
       browser.tabs
-        .warmup(tab.id)
-        .catch(err => Logs.err('Tab.onMouseEnter: Warmup hovered tab', err))
+        .warmup?.(tab.id)
+        ?.catch(err => Logs.err('Tab.onMouseEnter: Warmup hovered tab', err))
     }
   }
 

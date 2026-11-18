@@ -3065,7 +3065,7 @@ function updateSuccession(exclude?: readonly ID[]) {
       }
     }
 
-    if (suc.length > 1) {
+    if (suc.length > 1 && browser.tabs.moveInSuccession) {
       browser.tabs.moveInSuccession(suc).catch(err => {
         Logs.err('Tabs.updateSuccession: Cannot update succession:', err, suc)
       })
