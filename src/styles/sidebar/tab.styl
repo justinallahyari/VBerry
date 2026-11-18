@@ -59,6 +59,7 @@
   --tabs-fav-margin: calc((var(--tabs-title-line-height) - 16px + var(--tabs-title-padding-vert)) / 2)
 
   position: relative
+  box-sizing: border-box
   contain: layout style
   width: calc(100% - var(--tabs-margin) * 2)
   margin: 0 var(--tabs-margin)
@@ -161,6 +162,7 @@
   --tabs-indent-line-color: @css{color-mix(in srgb, var(--frame-bg) 85%, var(--frame-fg) 15%)}
 
   position: relative
+  box-sizing: border-box
   width: 100%
   min-height: var(--tabs-min-height)
   padding: var(--tabs-padding) 0 var(--tabs-padding) var(--tabs-padding)
@@ -329,6 +331,7 @@
 // -
 .Tab .main-row
   position: relative
+  box-sizing: border-box
   width: 100%
 .Tab[data-pin="true"] .main-row
   height: 100%
@@ -643,6 +646,7 @@
   --tabs-title-multiline-right-padding: calc(var(--tabs-padding) + var(--tabs-fav-margin))
 
   position: relative
+  box-sizing: border-box
   width: 100%
   margin: 0
   max-height: var(--tabs-title-max-height)
