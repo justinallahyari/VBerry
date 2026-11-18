@@ -739,7 +739,7 @@ function activate(): void {
 
   if (tab.id !== Tabs.activeId) {
     activating = true
-    browser.tabs.update(tab.id, { active: true })
+    browser.tabs.update(tab.id, { active: true }).catch(() => undefined)
   }
 }
 

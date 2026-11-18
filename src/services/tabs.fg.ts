@@ -1999,7 +1999,9 @@ export function activateParent(tabId?: ID): void {
   if (!Settings.state.tabsTree) return
   if (tabId === undefined) tabId = Tabs.activeId
   const tab = Tabs.byId[tabId]
-  if (tab && Tabs.byId[tab.parentId]) browser.tabs.update(tab.parentId, { active: true })
+  if (tab && Tabs.byId[tab.parentId]) {
+    browser.tabs.update(tab.parentId, { active: true }).catch(() => undefined)
+  }
 }
 
 /**
@@ -2613,7 +2615,9 @@ export function tabFlip() {
     if (Settings.state.tabsSecondClickActPrevNoUnload && tab?.discarded) return false
     return id !== Tabs.activeId
   })
-  if (prevTabId !== undefined) browser.tabs.update(prevTabId, { active: true })
+  if (prevTabId !== undefined) {
+    browser.tabs.update(prevTabId, { active: true }).catch(() => undefined)
+  }
 }
 
 export function getTabInfo(id: ID, setPanelId?: boolean): T.ItemInfo | undefined {

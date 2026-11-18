@@ -340,7 +340,6 @@ function onTabUpdated(tabId: ID, change: browser.tabs.ChangeInfo): void {
 
   const tab = Tabs.byId[tabId]
   if (!tab) {
-    Logs.warn('Tabs.onTabUpdated: No tab with id:', tabId, change)
     return
   }
 
