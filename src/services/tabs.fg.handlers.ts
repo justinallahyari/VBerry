@@ -90,6 +90,13 @@ function waitForOtherReopenedTabs(tab: Tab): void {
     })
     .catch(err => {
       Logs.err('Tabs.waitForOtherReopenedTabs: Cannot get tab data from session:', err)
+      if (!waitForOtherReopenedTabsBuffer) return
+
+      waitForOtherReopenedTabsCheckLen--
+      if (waitForOtherReopenedTabsCheckLen <= 0) {
+        clearTimeout(waitForOtherReopenedTabsTimeout)
+        releaseReopenedTabsBuffer()
+      }
     })
 
   // Set the time limit for this waiting, because when re-opening lots of tabs
@@ -1251,6 +1258,7 @@ function rememberChildTabs(childId: ID, parentId: ID): void {
  * Tabs.onRemoved
  */
 function onTabRemoved(tabId: ID, info: browser.tabs.RemoveInfo, detached?: boolean): void {
+  if (!info) return
   const isParkedTab =
     Settings.state.panelIsolationMode === 'windowParking' &&
     info.windowId === PanelIsolation.getParkedWindowId() &&
@@ -1287,6 +1295,10 @@ function onTabRemoved(tabId: ID, info: browser.tabs.RemoveInfo, detached?: boole
   if (!tab) {
     Logs.warn(`Tabs.onTabRemoved: Cannot find tab: ${tabId}`)
     return Tabs.reinitTabs()
+  }
+  if (Tabs.list[tab.index]?.id !== tabId) {
+    const actualIdx = Tabs.list.findIndex(t => t?.id === tabId)
+    if (actualIdx !== -1) tab.index = actualIdx
   }
 
   const toShow: ID[] = []
@@ -1370,7 +1382,7 @@ function onTabRemoved(tabId: ID, info: browser.tabs.RemoveInfo, detached?: boole
 
     for (let i = tab.index + 1, t; i < Tabs.list.length; i++) {
       t = Tabs.list[i]
-      if (t.lvl <= tab.lvl) break
+      if (!t || t.lvl <= tab.lvl) break
 
       // Tab will be detached, so skip handling it
       if (detached && Tabs.detachingTabIds.has(t.id)) continue
@@ -1457,7 +1469,8 @@ function onTabRemoved(tabId: ID, info: browser.tabs.RemoveInfo, detached?: boole
 
   // Shift tabs after removed one
   for (let i = tab.index + 1; i < Tabs.list.length; i++) {
-    Tabs.list[i].index--
+    const t = Tabs.list[i]
+    if (t) t.index--
   }
   delete Tabs.byId[tabId]
   Tabs.list.splice(tab.index, 1)
@@ -1539,11 +1552,15 @@ function onTabRemoved(tabId: ID, info: browser.tabs.RemoveInfo, detached?: boole
   // Reload related group for pinned tab
   const pinGroupTab = Tabs.byId[tab.relGroupId]
   if (tab.pinned && pinGroupTab) {
-    const groupUrl = new URL(pinGroupTab.url)
-    groupUrl.searchParams.delete('pin')
-    browser.tabs.update(tab.relGroupId, { url: groupUrl.href }).catch(err => {
-      Logs.err('Tabs.onTabRemoved: Cannot reload related group page:', err)
-    })
+    try {
+      const groupUrl = new URL(pinGroupTab.url)
+      groupUrl.searchParams.delete('pin')
+      browser.tabs.update(tab.relGroupId, { url: groupUrl.href }).catch(err => {
+        Logs.err('Tabs.onTabRemoved: Cannot reload related group page:', err)
+      })
+    } catch {
+      // Ignore invalid group URL
+    }
   }
 
   // Update group page info
@@ -1572,7 +1589,7 @@ let _ignoreMoveEvents = false
  * Tabs.onMoved
  */
 function onTabMoved(id: ID, info: browser.tabs.MoveInfo): void {
-  if (info.windowId !== Windows.id) return
+  if (!info || info.windowId !== Windows.id) return
   if (_ignoreMoveEvents) return
   if (!Tabs.ready) {
     Tabs.deferredEventHandling.push(() => onTabMoved(id, info))
@@ -1592,7 +1609,8 @@ function onTabMoved(id: ID, info: browser.tabs.MoveInfo): void {
     return
   }
 
-  Tabs.movingTabs.splice(Tabs.movingTabs.indexOf(id), 1)
+  const mvIndex = Tabs.movingTabs.indexOf(id)
+  if (mvIndex !== -1) Tabs.movingTabs.splice(mvIndex, 1)
   const mvLen = Tabs.movingTabs.length
 
   if (!mvLen) {
@@ -1651,7 +1669,7 @@ function onTabMoved(id: ID, info: browser.tabs.MoveInfo): void {
       (dstPanel.startTabIndex > info.toIndex || dstPanel.endTabIndex + 1 < info.toIndex)
 
     if (!dstPanel || outOfPanel) {
-      dstPanel = Sidebar.panelsById[toTab.panelId]
+      dstPanel = toTab ? Sidebar.panelsById[toTab.panelId] : undefined
     }
 
     if (Utils.isTabsPanel(srcPanel) && Utils.isTabsPanel(dstPanel) && srcPanel.id !== dstPanel.id) {
@@ -1666,10 +1684,10 @@ function onTabMoved(id: ID, info: browser.tabs.MoveInfo): void {
 
   // Calc tree levels and colorize branch
   if (Settings.state.tabsTree) {
-    const toTabFolded = toTab.folded
+    const toTabFolded = toTab?.folded
     if (!mvLen) Tabs.updateTabsTree()
 
-    if (toTabFolded !== toTab.folded && Settings.state.hideFoldedTabs) {
+    if (toTab && toTabFolded !== toTab.folded && Settings.state.hideFoldedTabs) {
       nativeTabsVisibilityUpdateNeeded = true
     }
 
@@ -1726,7 +1744,7 @@ export function ignoreMoveEvents(state: boolean, reason: string) {
  * Tabs.onDetached
  */
 function onTabDetached(id: ID, info: browser.tabs.DetachInfo): void {
-  if (info.oldWindowId !== Windows.id) return
+  if (!info || info.oldWindowId !== Windows.id) return
   if (!Tabs.ready || Tabs.sorting) {
     Tabs.deferredEventHandling.push(() => onTabDetached(id, info))
     return
@@ -1764,7 +1782,7 @@ function onTabDetached(id: ID, info: browser.tabs.DetachInfo): void {
  */
 const deferredActivationHandling = { id: D.NOID, cb: null as (() => void) | null }
 async function onTabAttached(id: ID, info: browser.tabs.AttachInfo): Promise<void> {
-  if (info.newWindowId !== Windows.id) return
+  if (!info || info.newWindowId !== Windows.id) return
   if (!Tabs.ready || Tabs.sorting) {
     Tabs.deferredEventHandling.push(() => onTabAttached(id, info))
     return
@@ -1781,7 +1799,7 @@ async function onTabAttached(id: ID, info: browser.tabs.AttachInfo): Promise<voi
   }
 
   // Unparked tab returning from parked window already exists in Tabs.byId
-  if (Settings.state.panelIsolationMode === 'windowParking' && Tabs.byId[id]) {
+  if (Tabs.byId[id]) {
     const existingTab = Tabs.byId[id]
     if (existingTab) {
       existingTab.windowId = info.newWindowId
@@ -1791,7 +1809,12 @@ async function onTabAttached(id: ID, info: browser.tabs.AttachInfo): Promise<voi
   }
 
   deferredActivationHandling.id = id
-  const nativeTab = await browser.tabs.get(id)
+  const nativeTab = await browser.tabs.get(id).catch(() => undefined)
+  if (!nativeTab) {
+    deferredActivationHandling.id = D.NOID
+    deferredActivationHandling.cb = null
+    return
+  }
   const tab = Tabs.mutateNativeTabToSideberyTab(nativeTab)
 
   tab.windowId = Windows.id

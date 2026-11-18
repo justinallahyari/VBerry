@@ -19,7 +19,6 @@ const POLYFILL_ENTRYPOINT_FILES = new Set([
   path.join(SRC_ROOT, 'popup.proxy/proxy.ts'),
   path.join(SRC_ROOT, 'popup.search/search.ts'),
   path.join(SRC_ROOT, 'popup.editing/editing.ts'),
-  path.join(SRC_ROOT, 'injections/tab-preview.ts'),
 ])
 
 function mv3PolyfillPlugin(): Plugin {
@@ -163,6 +162,9 @@ async function main() {
 
   // Isolated script for preview injection (in-page)
   const inpagePreviewInjection = defineConfig({
+    define: {
+      browser: '(globalThis.__sideberyBrowser ?? globalThis.chrome)',
+    },
     build: {
       rolldownOptions: {
         input: { 'injections/tab-preview': 'src/injections/tab-preview.ts' },

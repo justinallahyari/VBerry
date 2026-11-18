@@ -396,21 +396,27 @@ function buildPolyfillNamespaces() {
   const tabUpdatedSyntheticSet = new Map<browser.tabs.UpdatedListener, browser.tabs.ExtraParameters | undefined>()
 
   PanelIsolation.onHiddenStateChanged(async changes => {
-    for (const { tabId, hidden } of changes) {
-      let tabObj: browser.tabs.Tab | undefined
-      if (chromeApi?.tabs?.get) {
-        try {
-          const raw = await chromeApi.tabs.get(Number(tabId))
-          if (raw) tabObj = enrichTab(raw)
-        } catch {
-          tabObj = undefined
+    if (!tabUpdatedSyntheticSet.size) return
+    const resolved = await Promise.all(
+      changes.map(async ({ tabId, hidden }) => {
+        let tabObj: browser.tabs.Tab | undefined
+        if (chromeApi?.tabs?.get) {
+          try {
+            const raw = await chromeApi.tabs.get(Number(tabId))
+            if (raw) tabObj = enrichTab(raw)
+          } catch {
+            tabObj = undefined
+          }
         }
-      }
-      if (!tabObj) {
-        tabObj = enrichTab({ id: tabId, hidden })
-      } else {
-        tabObj.hidden = hidden
-      }
+        if (!tabObj) {
+          tabObj = enrichTab({ id: tabId, hidden })
+        } else {
+          tabObj.hidden = hidden
+        }
+        return { tabId, hidden, tabObj }
+      })
+    )
+    for (const { tabId, hidden, tabObj } of resolved) {
       for (const [listener, extra] of tabUpdatedSyntheticSet.entries()) {
         if (extra?.properties && !extra.properties.includes('hidden')) continue
         if (extra?.tabId !== undefined && extra.tabId !== tabId) continue
@@ -485,28 +491,34 @@ function buildPolyfillNamespaces() {
   const VIVALDI_FLAG_KEY = '__sidebery_is_vivaldi__'
   let cachedIsVivaldi =
     typeof navigator !== 'undefined' && /Vivaldi/i.test(navigator.userAgent)
+  let vivaldiDetectionDone = cachedIsVivaldi
 
   if (!cachedIsVivaldi && chromeApi?.storage?.local?.get) {
     Promise.resolve(chromeApi.storage.local.get(VIVALDI_FLAG_KEY))
       .then((res: any) => {
-        if (res?.[VIVALDI_FLAG_KEY]) cachedIsVivaldi = true
+        if (res?.[VIVALDI_FLAG_KEY]) {
+          cachedIsVivaldi = true
+          vivaldiDetectionDone = true
+        }
       })
       .catch(() => {})
   }
 
   function markVivaldiDetected(): void {
+    vivaldiDetectionDone = true
     if (cachedIsVivaldi) return
     cachedIsVivaldi = true
     chromeApi?.storage?.local?.set?.({ [VIVALDI_FLAG_KEY]: true })?.catch?.(() => {})
   }
 
   async function isVivaldiBrowser(): Promise<boolean> {
-    if (cachedIsVivaldi) return true
+    if (vivaldiDetectionDone) return cachedIsVivaldi
     try {
       if (chromeApi?.storage?.local?.get) {
         const stored = await chromeApi.storage.local.get(VIVALDI_FLAG_KEY).catch(() => undefined)
         if (stored?.[VIVALDI_FLAG_KEY]) {
           cachedIsVivaldi = true
+          vivaldiDetectionDone = true
           return true
         }
       }
@@ -536,6 +548,7 @@ function buildPolyfillNamespaces() {
     } catch {
       // ignore
     }
+    vivaldiDetectionDone = true
     return false
   }
 
@@ -664,7 +677,7 @@ function buildPolyfillNamespaces() {
         if (resolved !== undefined) props.windowId = resolved
         else delete props.windowId
       }
-      const moved = await chromeApi.tabs.move(ids, props)
+      const moved = await ContainerBridge.withTabEditRetry(() => chromeApi.tabs.move(ids, props))
       if (Array.isArray(moved)) return moved.map(enrichTab) as browser.tabs.Moved<T>
       return enrichTab(moved) as browser.tabs.Moved<T>
     },
@@ -682,7 +695,9 @@ function buildPolyfillNamespaces() {
       const dup = await chromeApi.tabs.duplicate(Number(tabId))
       if (dup?.id !== undefined) {
         if (opts?.index !== undefined) {
-          await chromeApi.tabs.move(dup.id, { index: opts.index }).catch(() => undefined)
+          await ContainerBridge.withTabEditRetry(() =>
+            chromeApi.tabs.move(dup.id, { index: opts.index })
+          ).catch(() => undefined)
         }
         if (opts?.active !== undefined) {
           await chromeApi.tabs.update(dup.id, { active: opts.active }).catch(() => undefined)
@@ -796,13 +811,13 @@ function buildPolyfillNamespaces() {
       const tabIds = Array.isArray(options.tabIds)
         ? options.tabIds.map(Number)
         : Number(options.tabIds)
-      await chromeApi.tabs.group({ ...options, tabIds })
+      await ContainerBridge.withTabEditRetry(() => chromeApi.tabs.group({ ...options, tabIds }))
     },
 
     async ungroup(tabIds: ID | ID[]): Promise<void> {
       if (!chromeApi?.tabs?.ungroup) return
       const ids = Array.isArray(tabIds) ? tabIds.map(Number) : Number(tabIds)
-      await chromeApi.tabs.ungroup(ids)
+      await ContainerBridge.withTabEditRetry(() => chromeApi.tabs.ungroup(ids))
     },
 
     async sendMessage(tabId: ID, msg: any): Promise<any> {
@@ -1459,11 +1474,15 @@ function buildPolyfillNamespaces() {
     'action',
   ])
   const menuClickHandlers = new Map<string | number, (info: any, tab?: any) => void>()
+  const createdMenuIds = new Set<string>()
+  let menuOpQueue: Promise<void> = Promise.resolve()
   let menuIdCounter = 0
 
   if (chromeApi?.contextMenus?.onClicked?.addListener) {
     chromeApi.contextMenus.onClicked.addListener((info: any, tab: any) => {
-      const handler = menuClickHandlers.get(info?.menuItemId)
+      const handler =
+        menuClickHandlers.get(info?.menuItemId) ??
+        menuClickHandlers.get(String(info?.menuItemId))
       if (handler) {
         try {
           handler(info, tab)
@@ -1471,6 +1490,91 @@ function buildPolyfillNamespaces() {
           // Isolate menu handler failures
         }
       }
+    })
+  }
+
+  function invokeContextMenusRemoveAll(): Promise<void> {
+    if (!chromeApi?.contextMenus?.removeAll) return Promise.resolve()
+    return new Promise<void>(resolve => {
+      let settled = false
+      const done = () => {
+        if (settled) return
+        settled = true
+        void chromeApi?.runtime?.lastError
+        resolve()
+      }
+      try {
+        const res = chromeApi.contextMenus.removeAll(done)
+        if (res && typeof res.then === 'function') {
+          res.then(done, done)
+        } else if (chromeApi.contextMenus.removeAll.length === 0) {
+          done()
+        }
+      } catch {
+        done()
+      }
+    })
+  }
+
+  function invokeContextMenusCreate(cleanProps: Record<string, any>): Promise<void> {
+    if (!chromeApi?.contextMenus?.create) return Promise.resolve()
+    const itemId = String(cleanProps.id)
+    return new Promise<void>(resolve => {
+      let settled = false
+      const done = () => {
+        if (settled) return
+        settled = true
+        void chromeApi?.runtime?.lastError
+        resolve()
+      }
+      const doCreate = () => {
+        try {
+          createdMenuIds.add(itemId)
+          const res = chromeApi.contextMenus.create(cleanProps, done)
+          if (res && typeof res.then === 'function') {
+            res.then(done, done)
+          } else if (chromeApi.contextMenus.create.length <= 1) {
+            done()
+          }
+        } catch {
+          done()
+        }
+      }
+      if (createdMenuIds.has(itemId)) {
+        if (typeof chromeApi?.contextMenus?.remove === 'function') {
+          try {
+            const rmRes = chromeApi.contextMenus.remove(itemId, () => {
+              void chromeApi?.runtime?.lastError
+              doCreate()
+            })
+            if (rmRes && typeof rmRes.then === 'function') {
+              rmRes.then(doCreate, doCreate)
+            } else if (chromeApi.contextMenus.remove.length <= 1) {
+              doCreate()
+            }
+            return
+          } catch {
+            // Fall through
+          }
+        } else if (typeof chromeApi?.contextMenus?.update === 'function') {
+          try {
+            const { id: _id, ...updateProps } = cleanProps
+            const updRes = chromeApi.contextMenus.update(itemId, updateProps, done)
+            if (updRes && typeof updRes.then === 'function') {
+              updRes.then(done, done)
+            } else if (chromeApi.contextMenus.update.length <= 2) {
+              done()
+            }
+            return
+          } catch {
+            // Fall through
+          }
+        } else {
+          done()
+          return
+        }
+      }
+      doCreate()
     })
   }
 
@@ -1512,21 +1616,28 @@ function buildPolyfillNamespaces() {
       }
       if (cleanProps.parentId !== undefined) cleanProps.parentId = String(cleanProps.parentId)
 
-      try {
-        chromeApi.contextMenus.create(cleanProps, () => {
-          void chromeApi?.runtime?.lastError
+      menuOpQueue = menuOpQueue
+        .then(async () => {
+          if (typeof onclick === 'function') {
+            menuClickHandlers.set(id, onclick)
+          }
+          await invokeContextMenusCreate(cleanProps)
         })
-      } catch {
-        // Ignore invalid context menu creation edge cases
-      }
+        .catch(() => undefined)
 
       return id
     },
-    removeAll(): void {
+    removeAll(): Promise<void> {
       menuClickHandlers.clear()
-      chromeApi?.contextMenus?.removeAll?.(() => {
-        void chromeApi?.runtime?.lastError
-      })
+      const next = menuOpQueue
+        .then(async () => {
+          menuClickHandlers.clear()
+          createdMenuIds.clear()
+          await invokeContextMenusRemoveAll()
+        })
+        .catch(() => undefined)
+      menuOpQueue = next
+      return next
     },
     overrideContext(_contextOptions: browser.menus.ContextOptions): void {
       // No Chrome equivalent; no-op

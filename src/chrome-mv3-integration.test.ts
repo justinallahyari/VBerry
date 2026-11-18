@@ -827,4 +827,83 @@ describe('Sidebery Chrome MV3 Integration & Lossless Compatibility', () => {
       installBrowserPolyfill(true)
     }
   })
+
+  test('Coexists safely with other addons: retries transient tab-drag locks, preserves foreign tab groups, and reconciles drifted tab indices', async () => {
+    const env = getEnv()
+    const g = globalThis as any
+    const PanelIsolation = await import('src/polyfill/panel-isolation')
+    const Settings = await import('src/services/settings')
+    const WindowsBg = await import('src/services/windows.bg')
+    const TabsBg = await import('src/services/tabs.bg')
+
+    const win = await browser.windows.create({ url: 'https://tab1.example.com' })
+    const tab1 = win.tabs![0]
+    const tab2 = await browser.tabs.create({ windowId: win.id, url: 'https://tab2.example.com' })
+    const tab3 = await browser.tabs.create({ windowId: win.id, url: 'https://tab3.example.com' })
+
+    // 1. Transient Chrome tab-drag lock retry ("Tabs cannot be edited right now (user may be dragging a tab)")
+    const origMove = g.chrome.tabs.move
+    let moveAttempts = 0
+    g.chrome.tabs.move = async (ids: number | number[], props: any) => {
+      moveAttempts++
+      if (moveAttempts === 1) {
+        throw new Error('Tabs cannot be edited right now (user may be dragging a tab).')
+      }
+      return origMove(ids, props)
+    }
+    try {
+      const moved = await browser.tabs.move(tab3.id, { index: 0 })
+      expect(moveAttempts).toBe(2)
+      expect((moved as browser.tabs.Tab).index).toBe(0)
+    } finally {
+      g.chrome.tabs.move = origMove
+    }
+
+    // 2. Preserve third-party/user native tab groups during PanelIsolation.syncWindowIsolation
+    const foreignGroupId = await g.chrome.tabs.group({
+      createProperties: { windowId: win.id },
+      tabIds: [tab2.id],
+    })
+    await g.chrome.tabGroups.update(foreignGroupId, {
+      title: 'External Addon Group',
+      color: 'purple',
+      collapsed: false,
+    })
+
+    Settings.state.panelIsolationMode = 'tabGroups'
+    await PanelIsolation.init()
+    await PanelIsolation.syncWindowIsolation(
+      win.id!,
+      'panel-work',
+      [
+        { id: tab1.id, panelId: 'panel-work', active: true, groupId: -1 },
+        { id: tab2.id, panelId: 'panel-other', active: false, groupId: foreignGroupId },
+      ],
+      {
+        'panel-work': { id: 'panel-work', name: 'Work', color: 'blue' },
+        'panel-other': { id: 'panel-other', name: 'Other', color: 'green' },
+      }
+    )
+
+    // tab2's foreign group must NOT be overwritten or collapsed by PanelIsolation
+    const rawTab2 = env.tabs.find((t: any) => t.id === tab2.id)
+    const rawForeignGroup = env.tabGroups.find((grp: any) => grp.id === foreignGroupId)
+    expect(rawTab2.groupId).toBe(foreignGroupId)
+    expect(rawForeignGroup.title).toBe('External Addon Group')
+    expect(rawForeignGroup.collapsed).toBe(false)
+
+    // 3. Reconcile drifted tab.index when another addon removes/moves tabs concurrently
+    await WindowsBg.load()
+    TabsBg.setupListeners()
+    await TabsBg.load()
+
+    // Simulate index drift caused by an external addon manipulating tabs out-of-band
+    if (TabsBg.byId[tab2.id]) {
+      TabsBg.byId[tab2.id].index = 99
+    }
+    await browser.tabs.remove(tab2.id)
+    expect(TabsBg.byId[tab2.id]).toBeUndefined()
+    const bgWinTabs = WindowsBg.byId.get(win.id!)?.tabs ?? []
+    expect(bgWinTabs.some(t => t.id === tab2.id)).toBe(false)
+  })
 })

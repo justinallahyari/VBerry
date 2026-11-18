@@ -1,5 +1,5 @@
 import type { PanelIsolationMode } from 'src/contracts/sidebery-schema'
-import { mapColorToChromeTabGroupColor } from 'src/polyfill/container-bridge'
+import { mapColorToChromeTabGroupColor, withTabEditRetry } from 'src/polyfill/container-bridge'
 
 export interface IsolationTabInput {
   id: ID
@@ -53,19 +53,12 @@ const parkedOrigins = new Map<ID, ParkedTabOrigin>()
 const panelGroupIds = new Map<string, number>()
 const hiddenChangeListeners = new Set<HiddenChangeListener>()
 
-let settingsModulePromise: Promise<SettingsModuleLike | null> | null = null
-function getSettingsModule(): Promise<SettingsModuleLike | null> {
-  if (!settingsModulePromise) {
-    settingsModulePromise = import('src/services/settings')
-      .then(m => m as unknown as SettingsModuleLike)
-      .catch(() => null)
-  }
-  return settingsModulePromise
+function getSettingsState(): SettingsModuleLike['state'] | undefined {
+  return (globalThis as any).__sideberySettingsState
 }
 
 async function getIsolationMode(): Promise<PanelIsolationMode> {
-  const mod = await getSettingsModule()
-  const rawStateMode = mod?.state?.panelIsolationMode
+  const rawStateMode = getSettingsState()?.panelIsolationMode
   const stateMode = rawStateMode && VALID_MODES.has(rawStateMode) ? rawStateMode : undefined
 
   if (stateMode !== undefined) return stateMode
@@ -179,9 +172,8 @@ function attachListeners(): void {
         const mode = changes.settings.newValue.panelIsolationMode
         if (mode && VALID_MODES.has(mode)) {
           lastStorageIsolationMode = mode
-          void getSettingsModule().then(mod => {
-            if (mod?.state) mod.state.panelIsolationMode = mode
-          })
+          const state = getSettingsState()
+          if (state) state.panelIsolationMode = mode
         }
       } else if (area === 'session') {
         if (changes[SESSION_HIDDEN_TABS_KEY]) {
@@ -354,31 +346,42 @@ async function parkTabs(ids: ID[]): Promise<void> {
   const targetWinId = Number(ensured.windowId)
   const tabsToMove: number[] = []
 
-  for (const id of ids) {
-    const numId = Number(id)
-    if (Number.isNaN(numId)) continue
-    try {
-      const tab = await chromeApi.tabs.get(numId)
-      if (!tab || tab.pinned) continue
-      if (tab.windowId === targetWinId) continue
-
-      if (!parkedOrigins.has(id)) {
-        parkedOrigins.set(id, { windowId: tab.windowId, index: tab.index ?? 0 })
+  const fetched = await Promise.all(
+    ids.map(async id => {
+      const numId = Number(id)
+      if (Number.isNaN(numId)) return null
+      try {
+        const tab = await chromeApi.tabs.get(numId)
+        return tab ? { id, numId, tab } : null
+      } catch {
+        return null
       }
-      tabsToMove.push(numId)
-    } catch {
-      // Tab no longer exists
+    })
+  )
+
+  for (const item of fetched) {
+    if (!item) continue
+    const { id, numId, tab } = item
+    if (tab.pinned || tab.windowId === targetWinId) continue
+
+    if (!parkedOrigins.has(id)) {
+      parkedOrigins.set(id, { windowId: tab.windowId, index: tab.index ?? 0 })
     }
+    tabsToMove.push(numId)
   }
 
   if (tabsToMove.length) {
     try {
-      await chromeApi.tabs.move(tabsToMove, { windowId: targetWinId, index: -1 })
+      await withTabEditRetry(() =>
+        chromeApi.tabs.move(tabsToMove, { windowId: targetWinId, index: -1 })
+      )
     } catch {
       // Best-effort per-tab move if batch fails
       for (const tabId of tabsToMove) {
         try {
-          await chromeApi.tabs.move(tabId, { windowId: targetWinId, index: -1 })
+          await withTabEditRetry(() =>
+            chromeApi.tabs.move(tabId, { windowId: targetWinId, index: -1 })
+          )
         } catch {
           parkedOrigins.delete(tabId)
         }
@@ -414,29 +417,46 @@ async function unparkTabs(ids: ID[], fallbackWindowId?: ID): Promise<void> {
     }
   }
 
-  for (const id of ids) {
-    const numId = Number(id)
-    if (Number.isNaN(numId)) continue
-    const origin = parkedOrigins.get(id)
-    let tab: any
+  const fetched = await Promise.all(
+    ids.map(async id => {
+      const numId = Number(id)
+      if (Number.isNaN(numId)) return null
+      try {
+        const tab = await chromeApi.tabs.get(numId)
+        return tab ? { id, numId, tab } : null
+      } catch {
+        parkedOrigins.delete(id)
+        return null
+      }
+    })
+  )
+
+  const validWinCache = new Map<number, boolean>()
+  async function isWindowOpen(winId: number): Promise<boolean> {
+    if (!chromeApi.windows?.get) return true
+    const cached = validWinCache.get(winId)
+    if (cached !== undefined) return cached
     try {
-      tab = await chromeApi.tabs.get(numId)
+      await chromeApi.windows.get(winId)
+      validWinCache.set(winId, true)
+      return true
     } catch {
-      parkedOrigins.delete(id)
-      continue
+      validWinCache.set(winId, false)
+      return false
     }
-    if (!tab) continue
+  }
+
+  for (const item of fetched) {
+    if (!item) continue
+    const { id, numId, tab } = item
+    const origin = parkedOrigins.get(id)
 
     const isInParkedWin = parkedWindowId !== null && tab.windowId === Number(parkedWindowId)
     if (!isInParkedWin && !origin) continue
 
     let dstWinId = origin ? Number(origin.windowId) : defaultFallbackWinId
-    if (dstWinId !== undefined && chromeApi.windows?.get) {
-      try {
-        await chromeApi.windows.get(dstWinId)
-      } catch {
-        dstWinId = defaultFallbackWinId
-      }
+    if (dstWinId !== undefined && !(await isWindowOpen(dstWinId))) {
+      dstWinId = defaultFallbackWinId
     }
     if (dstWinId === undefined || Number.isNaN(dstWinId)) continue
 
@@ -455,14 +475,18 @@ async function unparkTabs(ids: ID[], fallbackWindowId?: ID): Promise<void> {
 
   for (const item of toRestore) {
     try {
-      await chromeApi.tabs.move(item.numericId, {
-        windowId: item.windowId,
-        index: item.index,
-      })
+      await withTabEditRetry(() =>
+        chromeApi.tabs.move(item.numericId, {
+          windowId: item.windowId,
+          index: item.index,
+        })
+      )
       parkedOrigins.delete(item.tabId)
     } catch {
       try {
-        await chromeApi.tabs.move(item.numericId, { windowId: item.windowId, index: -1 })
+        await withTabEditRetry(() =>
+          chromeApi.tabs.move(item.numericId, { windowId: item.windowId, index: -1 })
+        )
         parkedOrigins.delete(item.tabId)
       } catch {
         // Ignore if tab/window vanished
@@ -486,24 +510,28 @@ async function setTabGroupCollapsedForTabs(ids: ID[], collapsed: boolean): Promi
   const chromeApi = getChrome()
   if (!chromeApi?.tabs?.get || !chromeApi?.tabGroups?.update) return
 
+  const numIds = ids.map(Number).filter(n => !Number.isNaN(n))
+  const tabs = await Promise.all(
+    numIds.map(numId => chromeApi.tabs.get(numId).catch(() => undefined))
+  )
+
+  const managedGroups = new Set<number>(panelGroupIds.values())
   const seenGroups = new Set<number>()
-  for (const id of ids) {
-    const numId = Number(id)
-    if (Number.isNaN(numId)) continue
-    try {
-      const tab = await chromeApi.tabs.get(numId)
-      if (!tab || tab.pinned) continue
-      if (collapsed && tab.active) continue
-      if (typeof tab.groupId === 'number' && tab.groupId !== -1 && !seenGroups.has(tab.groupId)) {
-        seenGroups.add(tab.groupId)
-        try {
-          await chromeApi.tabGroups.update(tab.groupId, { collapsed })
-        } catch {
-          // Chrome throws if collapsing a group that contains the active tab
-        }
+  for (const tab of tabs) {
+    if (!tab || tab.pinned) continue
+    if (collapsed && tab.active) continue
+    if (
+      typeof tab.groupId === 'number' &&
+      tab.groupId !== -1 &&
+      !seenGroups.has(tab.groupId) &&
+      (managedGroups.size === 0 || managedGroups.has(tab.groupId))
+    ) {
+      seenGroups.add(tab.groupId)
+      try {
+        await withTabEditRetry(() => chromeApi.tabGroups.update(tab.groupId, { collapsed }))
+      } catch {
+        // Chrome throws if collapsing a group that contains the active tab
       }
-    } catch {
-      // Ignore missing tab
     }
   }
 }
@@ -591,9 +619,38 @@ async function syncTabGroupsForWindow(
     list.push(tab)
   }
 
+  const knownPanelTitles = new Set<string>()
+  if (panelsById) {
+    for (const [id, info] of Object.entries(panelsById)) {
+      if (info?.name) knownPanelTitles.add(info.name)
+      knownPanelTitles.add(String(info?.id ?? id))
+    }
+  }
+  for (const panelId of tabsByPanel.keys()) {
+    const info = panelsById?.[panelId]
+    knownPanelTitles.add(info?.name ?? String(panelId))
+  }
+
+  const managedGroupIds = new Set<number>(panelGroupIds.values())
+  for (const g of existingGroups) {
+    if (g.title && knownPanelTitles.has(g.title)) {
+      managedGroupIds.add(g.id)
+    }
+  }
+
   let groupsDirty = false
   for (const [panelId, panelTabs] of tabsByPanel.entries()) {
-    const tabIds = panelTabs.map(t => Number(t.id)).filter(n => !Number.isNaN(n))
+    // Never ungroup or clobber tabs that belong to unrelated user/third-party native tab groups
+    const tabIds = panelTabs
+      .filter(
+        t =>
+          typeof t.groupId !== 'number' ||
+          t.groupId === -1 ||
+          !existingGroupIds.has(t.groupId) ||
+          managedGroupIds.has(t.groupId)
+      )
+      .map(t => Number(t.id))
+      .filter(n => !Number.isNaN(n))
     if (!tabIds.length) continue
 
     const panelInfo = panelsById?.[panelId]
@@ -602,34 +659,45 @@ async function syncTabGroupsForWindow(
     const mapKey = `${numericWinId}:${panelId}`
 
     let groupId = panelGroupIds.get(mapKey)
-    if (groupId !== undefined && !existingGroupIds.has(groupId)) {
-      const byTitle = existingGroups.find(g => g.title === title)
-      groupId = byTitle?.id
+    if (groupId === undefined || !existingGroupIds.has(groupId)) {
+      const byTitle = existingGroups.find(g => g.title === title && managedGroupIds.has(g.id))
+      if (byTitle) {
+        groupId = byTitle.id
+        panelGroupIds.set(mapKey, groupId)
+        groupsDirty = true
+      } else {
+        groupId = undefined
+      }
     }
 
     try {
-      if (groupId !== undefined && existingGroupIds.has(groupId)) {
-        await chromeApi.tabs.group({ groupId, tabIds })
+      if (groupId !== undefined && existingGroupIds.has(groupId) && managedGroupIds.has(groupId)) {
+        await withTabEditRetry(() => chromeApi.tabs.group({ groupId, tabIds }))
       } else {
-        groupId = await chromeApi.tabs.group({
-          createProperties: { windowId: numericWinId },
-          tabIds,
-        })
+        groupId = await withTabEditRetry(() =>
+          chromeApi.tabs.group({
+            createProperties: { windowId: numericWinId },
+            tabIds,
+          })
+        )
         if (groupId !== undefined) {
           existingGroupIds.add(groupId)
+          managedGroupIds.add(groupId)
           panelGroupIds.set(mapKey, groupId)
           groupsDirty = true
         }
       }
 
-      if (groupId !== undefined) {
+      if (groupId !== undefined && managedGroupIds.has(groupId)) {
         const hasActiveTab = panelTabs.some(t => t.active)
         const shouldCollapse = panelId !== activePanelId && !hasActiveTab
-        await chromeApi.tabGroups.update(groupId, {
-          title,
-          color,
-          collapsed: shouldCollapse,
-        })
+        await withTabEditRetry(() =>
+          chromeApi.tabGroups.update(groupId!, {
+            title,
+            color,
+            collapsed: shouldCollapse,
+          })
+        )
       }
     } catch {
       // Ignore transient tab/group errors (e.g. tab closing mid-update)

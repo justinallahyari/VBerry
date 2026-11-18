@@ -88,9 +88,8 @@ function saveFaviconsData(
 
 function getIndexToReplace(): number {
   const randomIndex = Math.trunc(Math.random() * favicons.length)
-  for (const domain of Object.keys(domainsInfo)) {
-    const domainInfo = domainsInfo[domain]
-    if (domainInfo.index === randomIndex) {
+  for (const domain in domainsInfo) {
+    if (domainsInfo[domain]?.index === randomIndex) {
       delete domainsInfo[domain]
     }
   }
@@ -132,9 +131,14 @@ export function saveFavicon(url: string, base64icon: string): void {
       // Icon doesn't exist or it's not bound to this domain
       if (!iconAlreadyExists || index !== domainInfo.index) {
         // Check if another domain uses the same icon index
-        const anotherDomainUsesThisIndex =
-          domainInfo &&
-          Object.values(domainsInfo).find(d => d !== domainInfo && d.index === domainInfo.index)
+        let anotherDomainUsesThisIndex = false
+        for (const d in domainsInfo) {
+          const info = domainsInfo[d]
+          if (info !== domainInfo && info.index === domainInfo.index) {
+            anotherDomainUsesThisIndex = true
+            break
+          }
+        }
 
         // It's the only domain using this index (favicon)
         if (!anotherDomainUsesThisIndex) {

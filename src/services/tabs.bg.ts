@@ -164,6 +164,7 @@ function openCachedWindow(cache: T.TabCache[]) {
       folded: !!cachedTab.folded,
     })
   }
+  if (!items.length) return
   items[0].active = true
   Windows.createWithTabs(items)
 }
@@ -279,21 +280,21 @@ function onTabRemoved(tabId: ID, info: browser.tabs.RemoveInfo): void {
   const tabWindow = Windows.byId.get(info.windowId)
   const tabs = tabWindow?.tabs
   const tab = Tabs.byId[tabId]
+  delete Tabs.byId[tabId]
   if (!tab || !tabs || info.isWindowClosing) return
 
-  const index = tabs.findIndex(t => t.id === tabId)
-  if (index === -1 || tab.index !== index) return
+  const index = tabs.findIndex(t => t?.id === tabId)
+  if (index !== -1) {
+    tabs.splice(index, 1)
 
-  tabs.splice(index, 1)
-  delete Tabs.byId[tabId]
-
-  const len = tabs.length
-  for (let i = index, t; i < len; i++) {
-    t = tabs[i]
-    if (t) t.index = i
-    else {
-      reinitTabs('onTabRemoved: Empty space in list')
-      return
+    const len = tabs.length
+    for (let i = index, t; i < len; i++) {
+      t = tabs[i]
+      if (t) t.index = i
+      else {
+        reinitTabs('onTabRemoved: Empty space in list')
+        return
+      }
     }
   }
 
@@ -469,22 +470,29 @@ function onTabMoved(id: ID, info: browser.tabs.MoveInfo): void {
     return
   }
 
-  const tabAtDstIndex = tabWindow.tabs[info.toIndex]
-  const tabAtSrcIndex = tabWindow.tabs[info.fromIndex]
+  const tabs = tabWindow.tabs
+  const tabAtDstIndex = tabs[info.toIndex]
+  let fromIndex = info.fromIndex
+  let tabAtSrcIndex = tabs[fromIndex]
 
   // Check if tab is already placed correctly
   if (tabAtDstIndex?.id === id && tabAtDstIndex.index === info.toIndex) return
 
   if (!tabAtSrcIndex || tabAtSrcIndex.id !== id) {
-    reinitTabs('onTabMoved: Wrong tab at src index')
-    return
+    fromIndex = tabs.findIndex(t => t?.id === id)
+    if (fromIndex === -1) {
+      reinitTabs('onTabMoved: Wrong tab at src index')
+      return
+    }
+    tabAtSrcIndex = tabs[fromIndex]
   }
 
-  tabWindow.tabs.splice(info.fromIndex, 1)
-  tabWindow.tabs.splice(info.toIndex, 0, tabAtSrcIndex)
+  tabs.splice(fromIndex, 1)
+  const toIndex = Math.min(Math.max(0, info.toIndex), tabs.length)
+  tabs.splice(toIndex, 0, tabAtSrcIndex)
 
-  for (let i = tabWindow.tabs.length, t; i--;) {
-    t = tabWindow.tabs[i]
+  for (let i = tabs.length, t; i--;) {
+    t = tabs[i]
     if (t) t.index = i
   }
 }
@@ -506,12 +514,16 @@ function onTabAttached(id: ID, info: browser.tabs.AttachInfo): void {
     return
   }
 
+  const existingIndex = tabs.findIndex(t => t?.id === id)
+  if (existingIndex !== -1) tabs.splice(existingIndex, 1)
+
+  const newPos = Math.min(Math.max(0, info.newPosition), tabs.length)
   tab.windowId = info.newWindowId
-  tab.index = info.newPosition
+  tab.index = newPos
 
-  tabs.splice(info.newPosition, 0, tab)
+  tabs.splice(newPos, 0, tab)
 
-  for (let i = info.newPosition, t; i < tabs.length; i++) {
+  for (let i = 0, t; i < tabs.length; i++) {
     t = tabs[i]
     if (t) t.index = i
     else {
@@ -542,9 +554,15 @@ function onTabDetached(id: ID, info: browser.tabs.DetachInfo): void {
     return
   }
 
-  tabs.splice(info.oldPosition, 1)[0]
+  let oldPos = info.oldPosition
+  if (tabs[oldPos]?.id !== id) {
+    oldPos = tabs.findIndex(t => t?.id === id)
+  }
+  if (oldPos === -1) return
 
-  for (let i = info.oldPosition, t; i < tabs.length; i++) {
+  tabs.splice(oldPos, 1)
+
+  for (let i = oldPos, t; i < tabs.length; i++) {
     t = tabs[i]
     if (t) t.index = i
     else {
@@ -845,10 +863,13 @@ export async function openTabs(items: T.ItemInfo[], dst: T.DstPlaceInfo) {
 }
 
 export async function reopenTab(tab: T.BgTab, url: string, cookieStoreId?: string) {
+  if (!tab || !Tabs.byId[tab.id]) return
   let index: number | undefined
-  const checkingIfSidebarOpen = browser.sidebarAction.isOpen({ windowId: tab.windowId }).then(v => {
-    if (!v) throw false
-  })
+  const checkingIfSidebarOpen = browser.sidebarAction?.isOpen
+    ? browser.sidebarAction.isOpen({ windowId: tab.windowId }).then(v => {
+        if (!v) throw false
+      })
+    : Promise.resolve()
   const receivingIndex = IPC.sidebar(tab.windowId, 'handleReopening', tab.id, cookieStoreId)
   try {
     const [i] = await Promise.all([receivingIndex, checkingIfSidebarOpen])
@@ -859,15 +880,19 @@ export async function reopenTab(tab: T.BgTab, url: string, cookieStoreId?: strin
 
   if (index === undefined) index = tab.index
 
-  await browser.tabs.create({
-    windowId: tab.windowId,
-    url: Utils.sanitizeUrl(url),
-    cookieStoreId,
-    active: tab.active,
-    index,
-    pinned: tab.pinned,
-  })
-  await browser.tabs.remove(tab.id)
+  await browser.tabs
+    .create({
+      windowId: tab.windowId,
+      url: Utils.sanitizeUrl(url),
+      cookieStoreId,
+      active: tab.active,
+      index,
+      pinned: tab.pinned,
+    })
+    .catch(err => {
+      Logs.err('Tabs.reopenTab: Cannot create tab:', err)
+    })
+  await browser.tabs.remove(tab.id).catch(() => {})
 }
 
 export function getActiveTabInLastFocusedWindow() {

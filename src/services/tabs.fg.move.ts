@@ -54,7 +54,7 @@ export async function move(
       Logs.warn('Tabs.move: Move tabs from another window: Cannot detach tabs from sidebar')
     }
     if (!externalTabs) {
-      const winNativeTabs = await browser.tabs.query({ windowId: src.windowId })
+      const winNativeTabs = await browser.tabs.query({ windowId: src.windowId }).catch(() => [])
       externalTabs = []
       for (const tabInfo of tabsInfo) {
         const nativeTab = winNativeTabs.find(t => t.id === tabInfo.id)
@@ -342,41 +342,46 @@ export async function move(
   Tabs.movingTabs.push(...ids)
   tabs.forEach(t => (t.moving = true))
 
-  // Update native tabs
-  // ---
-  // Unpin tab
-  if (toUnpin?.length) {
-    for (const tab of [...toUnpin].reverse()) {
-      tab.unpinning = true
-      await browser.tabs.update(tab.id, { pinned: false }).catch(err => {
-        Logs.err('Tabs.move: Cannot unpin tab', err)
-      })
-      tab.unpinning = false
+  try {
+    // Update native tabs
+    // ---
+    // Unpin tab
+    if (toUnpin?.length) {
+      for (const tab of [...toUnpin].reverse()) {
+        tab.unpinning = true
+        await browser.tabs.update(tab.id, { pinned: false }).catch(err => {
+          Logs.err('Tabs.move: Cannot unpin tab', err)
+        })
+        tab.unpinning = false
+      }
     }
-  }
 
-  // Pin tab
-  if (toPin?.length) {
-    for (const tab of toPin) {
-      await browser.tabs.update(tab.id, { pinned: true, openerTabId: tab.id }).catch(err => {
-        Logs.err('Tabs.move: Cannot pin tab', err)
+    // Pin tab
+    if (toPin?.length) {
+      for (const tab of toPin) {
+        await browser.tabs.update(tab.id, { pinned: true, openerTabId: tab.id }).catch(err => {
+          Logs.err('Tabs.move: Cannot pin tab', err)
+        })
+      }
+    }
+
+    // Move tabs
+    const samePosition = srcIndex === tabs[0].index
+    const canSkipMove = oneAfterAnother && samePosition
+    if (!canSkipMove) {
+      const nativeDstIndex = dst.index <= tabs[0].index ? dst.index : dst.index - 1
+      await browser.tabs.move(ids, { windowId: Windows.id, index: nativeDstIndex }).catch(err => {
+        Logs.err('Tabs.move: Cannot move native tabs', err)
       })
     }
-  }
-
-  // Move tabs
-  const samePosition = srcIndex === tabs[0].index
-  const canSkipMove = oneAfterAnother && samePosition
-  if (!canSkipMove) {
-    const nativeDstIndex = dst.index <= tabs[0].index ? dst.index : dst.index - 1
-    await browser.tabs.move(ids, { windowId: Windows.id, index: nativeDstIndex }).catch(err => {
-      Logs.err('Tabs.move: Cannot move native tabs', err)
+  } finally {
+    // Reset moving tabs marks
+    tabs.forEach(t => {
+      t.moving = undefined
+      t.unpinning = false
     })
+    movingTabs = []
   }
-
-  // Reset moving tabs marks
-  tabs.forEach(t => (t.moving = undefined))
-  movingTabs = []
 
   // Update visibility
   if (
@@ -410,7 +415,9 @@ async function moveTabsToWin(tabIds: ID[], dst: T.DstPlaceInfo): Promise<void> {
   const activeTab = activeTabId !== undefined ? Tabs.byId[activeTabId] : undefined
   if (activeTab) {
     const target = Tabs.findSuccessorTab(activeTab, tabIds)
-    if (target) await browser.tabs.moveInSuccession([activeTab.id], target.id)
+    if (target) {
+      await browser.tabs.moveInSuccession?.([activeTab.id], target.id)?.catch(() => undefined)
+    }
   }
 
   const detachedTabsInfo = Tabs.detachTabs(tabIds)
@@ -431,10 +438,17 @@ async function moveTabsToWin(tabIds: ID[], dst: T.DstPlaceInfo): Promise<void> {
   }
 
   if (!moved) {
-    await browser.tabs.move(
-      tabs.map(t => t.id),
-      { windowId: dst.windowId, index: -1 }
-    )
+    await browser.tabs
+      .move(
+        tabs.map(t => t.id),
+        { windowId: dst.windowId, index: -1 }
+      )
+      .catch(err => {
+        Logs.err('Tabs.moveTabsToWin: Cannot move tabs:', err)
+      })
+      .finally(() => {
+        for (const t of tabs) Tabs.detachingTabIds.delete(t.id)
+      })
   }
 
   Tabs.cacheTabsData()
@@ -455,8 +469,16 @@ export async function moveToThisWin(
   const toPinned = dst?.pinned || (probeTab.pinned && dst?.pinned === undefined && !dst?.parentId)
   const srcWinId = probeTab.windowId
 
-  let panel = Sidebar.panelsById[dst?.panelId ?? NOID]
+  let panel: (typeof Sidebar.panels)[number] | undefined = Sidebar.panelsById[dst?.panelId ?? NOID]
   if (!Utils.isTabsPanel(panel)) panel = Sidebar.panelsById[probeTab.panelId]
+  if (!Utils.isTabsPanel(panel)) panel = Sidebar.panels.find(Utils.isTabsPanel)
+  if (!Utils.isTabsPanel(panel)) {
+    for (const t of tabs) {
+      const ai = Tabs.attachingTabs.findIndex(at => at.id === t.id)
+      if (ai > -1) Tabs.attachingTabs.splice(ai, 1)
+    }
+    return false
+  }
 
   let indexFallback
   if (Utils.isTabsPanel(panel) && panel.nextTabIndex > -1) indexFallback = panel.nextTabIndex
@@ -493,7 +515,9 @@ export async function moveToThisWin(
     // Pin / Unpin
     if (!!tab.pinned !== !!dst.pinned) {
       if (!dst.pinned) tab.unpinning = true
-      await browser.tabs.update(tab.id, { pinned: !!dst.pinned })
+      await browser.tabs.update(tab.id, { pinned: !!dst.pinned }).catch(err => {
+        Logs.err('Tabs.moveToThisWin: Cannot update pinned state:', err)
+      })
       tab.reactive.pinned = tab.pinned = !!dst.pinned
       if (tab.unpinning) tab.unpinning = false
     }
@@ -554,22 +578,32 @@ export async function moveToThisWin(
   // This is needed to prevent unneeded sequential activation of tabs.
   let tmpLastTab
   if (allInWin && tabs.length > 1) {
-    tmpLastTab = await browser.tabs.create({
-      url: 'about:blank',
-      active: true,
-      index: 0,
-      windowId: srcWinId,
-    })
+    tmpLastTab = await browser.tabs
+      .create({
+        url: 'about:blank',
+        active: true,
+        index: 0,
+        windowId: srcWinId,
+      })
+      .catch(() => undefined)
   }
 
   // Move native tabs
-  await browser.tabs.move(tabIds, { windowId: Windows.id, index }).catch(err => {
-    Logs.err('Tabs.moveToThisWin: Cannot move tab:', err)
-  })
+  await browser.tabs
+    .move(tabIds, { windowId: Windows.id, index })
+    .catch(err => {
+      Logs.err('Tabs.moveToThisWin: Cannot move tab:', err)
+    })
+    .finally(() => {
+      for (const id of tabIds) {
+        const ai = Tabs.attachingTabs.findIndex(t => t.id === id)
+        if (ai > -1) Tabs.attachingTabs.splice(ai, 1)
+      }
+    })
 
   // Close window with temp last tab
   if (tmpLastTab) {
-    browser.windows.remove(srcWinId)
+    browser.windows.remove(srcWinId).catch(() => undefined)
   }
 
   // Update/Recalc local state
@@ -592,7 +626,7 @@ export async function moveToThisWin(
 
   // Activate tab
   if (activateTabId !== NOID) {
-    await browser.tabs.update(activateTabId, { active: true })
+    await browser.tabs.update(activateTabId, { active: true }).catch(() => undefined)
   }
 
   // Update native tabs visibility
@@ -676,11 +710,15 @@ export function detachTabs(tabIds: ID[]): DetachedTabsInfo | undefined {
     // Reload related group for pinned tab
     const pinGroupTab = Tabs.byId[tab.relGroupId]
     if (tab.pinned && pinGroupTab) {
-      const groupUrl = new URL(pinGroupTab.url)
-      groupUrl.searchParams.delete('pin')
-      browser.tabs.update(tab.relGroupId, { url: groupUrl.href }).catch(err => {
-        Logs.err('Tabs.detachTabs: Cannot reload related group page:', err)
-      })
+      try {
+        const groupUrl = new URL(pinGroupTab.url)
+        groupUrl.searchParams.delete('pin')
+        browser.tabs.update(tab.relGroupId, { url: groupUrl.href }).catch(err => {
+          Logs.err('Tabs.detachTabs: Cannot reload related group page:', err)
+        })
+      } catch {
+        // Ignore invalid group URL
+      }
     }
 
     // Update group page info
@@ -702,7 +740,7 @@ export function detachTabs(tabIds: ID[]): DetachedTabsInfo | undefined {
   Tabs.updateTabsIndexes()
   Tabs.updateTabsTree()
   Sidebar.recalcTabsPanels()
-  if (!probeTab.pinned) Sidebar.recalcVisibleTabs(panel.id)
+  if (!probeTab.pinned && panel) Sidebar.recalcVisibleTabs(panel.id)
   if (toSave.length) toSave.forEach(id => Tabs.saveTabData(id))
 
   // Save new tabs cache
@@ -715,7 +753,7 @@ export function detachTabs(tabIds: ID[]): DetachedTabsInfo | undefined {
   if (Search.active) Search.search()
 
   // Update media badges
-  if (updMediaBadges) {
+  if (updMediaBadges && panel) {
     Sidebar.updateMediaStateOfPanelDebounced(100, panel.id)
   }
 

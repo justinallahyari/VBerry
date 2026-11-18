@@ -21,6 +21,7 @@ const SESSION_KEY_ORIG_URLS = 'sidebery_tab_orig_urls'
 
 const LOCAL_KEY_ANCHORS = 'tabTreeAnchors'
 const LOCAL_KEY_IDB_FALLBACK = 'sidebery_idb_fallback'
+const MAX_CACHE_ENTRIES = 5000
 
 const EPHEMERAL_IPPC_SUFFIX_RE =
   /~!(?:[^~]*!(?:ch|b)|[A-Za-z0-9+/_-]+={0,3}\.\d{1,8}\.(?:\w|-){12}!\w!\w)!~$/
@@ -117,24 +118,97 @@ async function storageSet(
 
 function toPlainData<TVal>(val: TVal): TVal {
   if (val === undefined || val === null || typeof val !== 'object') return val
-  try {
-    return JSON.parse(JSON.stringify(val)) as TVal
-  } catch {
-    if (Array.isArray(val)) return val.map(v => toPlainData(v)) as unknown as TVal
-    const out: Record<string, any> = {}
-    for (const [k, v] of Object.entries(val as Record<string, any>)) {
-      if (typeof v !== 'function' && v !== undefined) out[k] = toPlainData(v)
+  if (Array.isArray(val)) {
+    let isFlat = true
+    for (let i = 0; i < val.length; i++) {
+      const item = val[i]
+      if (item !== null && (typeof item === 'object' || typeof item === 'function')) {
+        isFlat = false
+        break
+      }
     }
-    return out as TVal
+    if (isFlat) return val.slice() as unknown as TVal
+  } else {
+    const proto = Object.getPrototypeOf(val)
+    if (proto === Object.prototype || proto === null) {
+      const out: Record<string, any> = {}
+      let isFlat = true
+      for (const [k, v] of Object.entries(val as Record<string, any>)) {
+        if (v === undefined || typeof v === 'function') continue
+        if (v !== null && typeof v === 'object') {
+          isFlat = false
+          break
+        }
+        out[k] = v
+      }
+      if (isFlat) return out as TVal
+    }
   }
+  if (typeof structuredClone === 'function') {
+    try {
+      return structuredClone(val)
+    } catch {
+      // Fallback for proxies or non-cloneable values
+    }
+  }
+  if (Array.isArray(val)) return val.map(v => toPlainData(v)) as unknown as TVal
+  const out: Record<string, any> = {}
+  for (const [k, v] of Object.entries(val as Record<string, any>)) {
+    if (typeof v !== 'function' && v !== undefined) out[k] = toPlainData(v)
+  }
+  return out as TVal
 }
 
 function mapToRecord<V>(map: Map<string, V>): Record<string, V> {
   const rec: Record<string, V> = {}
   for (const [k, v] of map.entries()) {
-    rec[k] = toPlainData(v)
+    rec[k] = v
   }
   return rec
+}
+
+interface IDBBatchOp {
+  store: string
+  type: 'put' | 'delete'
+  value?: any
+  key?: IDBValidKey
+}
+
+function pruneBoundedCaches(): IDBBatchOp[] {
+  const ops: IDBBatchOp[] = []
+  if (anchorsByTabId.size > MAX_CACHE_ENTRIES) {
+    const entries = Array.from(anchorsByTabId.entries()).sort(
+      (a, b) => (a[1].updatedAt ?? 0) - (b[1].updatedAt ?? 0)
+    )
+    const evictCount = anchorsByTabId.size - MAX_CACHE_ENTRIES
+    for (let i = 0; i < evictCount; i++) {
+      const [idKey, rec] = entries[i]
+      anchorsByTabId.delete(idKey)
+      tabValues.delete(idKey)
+      containerByTabId.delete(idKey)
+      originalUrlByTabId.delete(idKey)
+      ops.push({ store: STORE_TABS_BY_ID, type: 'delete', key: rec.id as IDBValidKey })
+      if (rec.fingerprint) {
+        const fpOwner = fingerprintMap.get(rec.fingerprint)
+        if (!fpOwner || String(fpOwner.id) === idKey) {
+          fingerprintMap.delete(rec.fingerprint)
+          ops.push({ store: STORE_TABS_BY_FP, type: 'delete', key: rec.fingerprint })
+        }
+      }
+    }
+  }
+  if (fingerprintMap.size > MAX_CACHE_ENTRIES) {
+    const fpEntries = Array.from(fingerprintMap.entries()).sort(
+      (a, b) => (a[1].updatedAt ?? 0) - (b[1].updatedAt ?? 0)
+    )
+    const evictCount = fingerprintMap.size - MAX_CACHE_ENTRIES
+    for (let i = 0; i < evictCount; i++) {
+      const [fp] = fpEntries[i]
+      fingerprintMap.delete(fp)
+      ops.push({ store: STORE_TABS_BY_FP, type: 'delete', key: fp })
+    }
+  }
+  return ops
 }
 
 function openDatabase(): Promise<IDBDatabase | null> {
@@ -201,15 +275,27 @@ function idbGetAll<TOut>(db: IDBDatabase, storeName: string): Promise<TOut[]> {
   })
 }
 
-async function idbPutRecord(storeName: string, record: Record<string, any>): Promise<boolean> {
+async function idbRunBatch(ops: IDBBatchOp[]): Promise<boolean> {
+  if (!ops.length) return true
   const db = await openDatabase()
   if (!db) return false
 
+  const storeNames = Array.from(new Set(ops.map(op => op.store)))
   return new Promise<boolean>(resolve => {
     try {
-      const tx = db.transaction(storeName, 'readwrite')
-      const store = tx.objectStore(storeName)
-      store.put(toPlainData(record))
+      const tx = db.transaction(storeNames.length === 1 ? storeNames[0] : storeNames, 'readwrite')
+      const stores = new Map<string, IDBObjectStore>()
+      for (const name of storeNames) {
+        stores.set(name, tx.objectStore(name))
+      }
+      for (const op of ops) {
+        const store = stores.get(op.store)!
+        if (op.type === 'put') {
+          store.put(toPlainData(op.value))
+        } else if (op.type === 'delete' && op.key !== undefined) {
+          store.delete(op.key)
+        }
+      }
       tx.oncomplete = () => resolve(true)
       tx.onerror = () => resolve(false)
       tx.onabort = () => resolve(false)
@@ -219,22 +305,12 @@ async function idbPutRecord(storeName: string, record: Record<string, any>): Pro
   })
 }
 
-async function idbDeleteKey(storeName: string, key: IDBValidKey): Promise<boolean> {
-  const db = await openDatabase()
-  if (!db) return false
+async function idbPutRecord(storeName: string, record: Record<string, any>): Promise<boolean> {
+  return idbRunBatch([{ store: storeName, type: 'put', value: record }])
+}
 
-  return new Promise<boolean>(resolve => {
-    try {
-      const tx = db.transaction(storeName, 'readwrite')
-      const store = tx.objectStore(storeName)
-      store.delete(key)
-      tx.oncomplete = () => resolve(true)
-      tx.onerror = () => resolve(false)
-      tx.onabort = () => resolve(false)
-    } catch {
-      resolve(false)
-    }
-  })
+async function idbDeleteKey(storeName: string, key: IDBValidKey): Promise<boolean> {
+  return idbRunBatch([{ store: storeName, type: 'delete', key }])
 }
 
 function buildIDBFallbackSnapshot(): IDBFallbackState {
@@ -546,6 +622,7 @@ export async function init(): Promise<void> {
       }
     }
 
+    pruneBoundedCaches()
     initialized = true
   })()
 
@@ -615,12 +692,19 @@ export function computeFingerprint(info: TabCompositeFingerprint): string {
   ])
 }
 
-async function persistRecordToLayer2(record: TabTreeAnchorRecord): Promise<void> {
-  const [wroteId, wroteFp] = await Promise.all([
-    idbPutRecord(STORE_TABS_BY_ID, record),
-    record.fingerprint ? idbPutRecord(STORE_TABS_BY_FP, record) : Promise.resolve(true),
-  ])
-  await syncDurableMirror(!(wroteId && wroteFp))
+async function persistRecordToLayer2(
+  record: TabTreeAnchorRecord,
+  extraOps?: IDBBatchOp[]
+): Promise<void> {
+  const ops: IDBBatchOp[] = [{ store: STORE_TABS_BY_ID, type: 'put', value: record }]
+  if (record.fingerprint) {
+    ops.push({ store: STORE_TABS_BY_FP, type: 'put', value: record })
+  }
+  if (extraOps?.length) {
+    ops.push(...extraOps)
+  }
+  const ok = await idbRunBatch(ops)
+  await syncDurableMirror(!ok)
 }
 
 async function persistMetaToLayer2(metaKey: string, data: any): Promise<void> {
@@ -680,6 +764,7 @@ export async function setTabValue(tabId: ID, key: string, value: any): Promise<v
 
     anchorsByTabId.set(idKey, updatedAnchor)
     fingerprintMap.set(fingerprint, updatedAnchor)
+    const pruneOps = pruneBoundedCaches()
 
     await enqueuePersist(async () => {
       await syncSessionLayer({
@@ -688,8 +773,10 @@ export async function setTabValue(tabId: ID, key: string, value: any): Promise<v
         containers: Boolean(containerId),
         originalUrls: Boolean(originalUrl),
       })
-      await persistRecordToLayer2(updatedAnchor)
-      await idbPutRecord(STORE_META, { key: 'tab_values', data: mapToRecord(tabValues) })
+      await persistRecordToLayer2(updatedAnchor, [
+        ...pruneOps,
+        { store: STORE_META, type: 'put', value: { key: 'tab_values', data: mapToRecord(tabValues) } },
+      ])
     })
     return
   }
@@ -761,40 +848,44 @@ export async function setTabContainerId(tabId: ID, containerId: string): Promise
   containerByTabId.set(idKey, containerId)
 
   const existingAnchor = anchorsByTabId.get(idKey)
+  let updatedAnchor: TabTreeAnchorRecord | undefined
   if (existingAnchor) {
-    existingAnchor.containerId = containerId
-    existingAnchor.updatedAt = Date.now()
-    if (existingAnchor.fingerprint) {
-      fingerprintMap.set(existingAnchor.fingerprint, existingAnchor)
+    updatedAnchor = { ...existingAnchor, containerId, updatedAt: Date.now() }
+    anchorsByTabId.set(idKey, updatedAnchor)
+    if (updatedAnchor.fingerprint) {
+      fingerprintMap.set(updatedAnchor.fingerprint, updatedAnchor)
     }
   }
 
   const existingTabData = tabValues.get(idKey)
   if (existingTabData?.data && typeof existingTabData.data === 'object') {
-    existingTabData.data.containerId = containerId
+    tabValues.set(idKey, {
+      ...existingTabData,
+      data: { ...existingTabData.data, containerId },
+    })
   }
 
   await enqueuePersist(async () => {
     await syncSessionLayer({
       containers: true,
       tabs: Boolean(existingTabData?.data),
-      fingerprints: Boolean(existingAnchor?.fingerprint),
+      fingerprints: Boolean(updatedAnchor?.fingerprint),
     })
-    const wroteMeta = await idbPutRecord(STORE_META, {
-      key: 'containers',
-      data: mapToRecord(containerByTabId),
-    })
-    let wroteAnchor = true
-    if (existingAnchor) {
-      const [w1, w2] = await Promise.all([
-        idbPutRecord(STORE_TABS_BY_ID, existingAnchor),
-        existingAnchor.fingerprint
-          ? idbPutRecord(STORE_TABS_BY_FP, existingAnchor)
-          : Promise.resolve(true),
-      ])
-      wroteAnchor = w1 && w2
+    const ops: IDBBatchOp[] = [
+      {
+        store: STORE_META,
+        type: 'put',
+        value: { key: 'containers', data: mapToRecord(containerByTabId) },
+      },
+    ]
+    if (updatedAnchor) {
+      ops.push({ store: STORE_TABS_BY_ID, type: 'put', value: updatedAnchor })
+      if (updatedAnchor.fingerprint) {
+        ops.push({ store: STORE_TABS_BY_FP, type: 'put', value: updatedAnchor })
+      }
     }
-    await syncDurableMirror(!(wroteMeta && wroteAnchor))
+    const ok = await idbRunBatch(ops)
+    await syncDurableMirror(!ok)
   })
 }
 
@@ -810,40 +901,44 @@ export async function setTabOriginalUrl(tabId: ID, originalUrl: string): Promise
   originalUrlByTabId.set(idKey, originalUrl)
 
   const existingAnchor = anchorsByTabId.get(idKey)
+  let updatedAnchor: TabTreeAnchorRecord | undefined
   if (existingAnchor) {
-    existingAnchor.originalUrl = originalUrl
-    existingAnchor.updatedAt = Date.now()
-    if (existingAnchor.fingerprint) {
-      fingerprintMap.set(existingAnchor.fingerprint, existingAnchor)
+    updatedAnchor = { ...existingAnchor, originalUrl, updatedAt: Date.now() }
+    anchorsByTabId.set(idKey, updatedAnchor)
+    if (updatedAnchor.fingerprint) {
+      fingerprintMap.set(updatedAnchor.fingerprint, updatedAnchor)
     }
   }
 
   const existingTabData = tabValues.get(idKey)
   if (existingTabData?.data && typeof existingTabData.data === 'object') {
-    existingTabData.data.originalUrl = originalUrl
+    tabValues.set(idKey, {
+      ...existingTabData,
+      data: { ...existingTabData.data, originalUrl },
+    })
   }
 
   await enqueuePersist(async () => {
     await syncSessionLayer({
       originalUrls: true,
       tabs: Boolean(existingTabData?.data),
-      fingerprints: Boolean(existingAnchor?.fingerprint),
+      fingerprints: Boolean(updatedAnchor?.fingerprint),
     })
-    const wroteMeta = await idbPutRecord(STORE_META, {
-      key: 'original_urls',
-      data: mapToRecord(originalUrlByTabId),
-    })
-    let wroteAnchor = true
-    if (existingAnchor) {
-      const [w1, w2] = await Promise.all([
-        idbPutRecord(STORE_TABS_BY_ID, existingAnchor),
-        existingAnchor.fingerprint
-          ? idbPutRecord(STORE_TABS_BY_FP, existingAnchor)
-          : Promise.resolve(true),
-      ])
-      wroteAnchor = w1 && w2
+    const ops: IDBBatchOp[] = [
+      {
+        store: STORE_META,
+        type: 'put',
+        value: { key: 'original_urls', data: mapToRecord(originalUrlByTabId) },
+      },
+    ]
+    if (updatedAnchor) {
+      ops.push({ store: STORE_TABS_BY_ID, type: 'put', value: updatedAnchor })
+      if (updatedAnchor.fingerprint) {
+        ops.push({ store: STORE_TABS_BY_FP, type: 'put', value: updatedAnchor })
+      }
     }
-    await syncDurableMirror(!(wroteMeta && wroteAnchor))
+    const ok = await idbRunBatch(ops)
+    await syncDurableMirror(!ok)
   })
 }
 
@@ -875,18 +970,18 @@ export async function removeTabAnchor(tabId: ID): Promise<void> {
       originalUrls: true,
     })
 
-    const ops: Promise<boolean>[] = [
-      idbDeleteKey(STORE_TABS_BY_ID, tabId as IDBValidKey),
-      idbPutRecord(STORE_META, { key: 'tab_values', data: mapToRecord(tabValues) }),
-      idbPutRecord(STORE_META, { key: 'containers', data: mapToRecord(containerByTabId) }),
-      idbPutRecord(STORE_META, { key: 'original_urls', data: mapToRecord(originalUrlByTabId) }),
+    const ops: IDBBatchOp[] = [
+      { store: STORE_TABS_BY_ID, type: 'delete', key: tabId as IDBValidKey },
+      { store: STORE_META, type: 'put', value: { key: 'tab_values', data: mapToRecord(tabValues) } },
+      { store: STORE_META, type: 'put', value: { key: 'containers', data: mapToRecord(containerByTabId) } },
+      { store: STORE_META, type: 'put', value: { key: 'original_urls', data: mapToRecord(originalUrlByTabId) } },
     ]
     if (deletedFp) {
-      ops.push(idbDeleteKey(STORE_TABS_BY_FP, deletedFp))
+      ops.push({ store: STORE_TABS_BY_FP, type: 'delete', key: deletedFp })
     }
 
-    const results = await Promise.all(ops)
-    await syncDurableMirror(results.some(ok => !ok))
+    const ok = await idbRunBatch(ops)
+    await syncDurableMirror(!ok)
   })
 }
 
@@ -986,20 +1081,24 @@ export async function anchorTabState(
     ...existingTabVals,
     data: recordToSessionData(record),
   })
+  const pruneOps = pruneBoundedCaches()
 
   await enqueuePersist(async () => {
     const oldFp = existing?.fingerprint && existing.fingerprint !== fingerprint ? existing.fingerprint : undefined
-    if (oldFp) {
-      await idbDeleteKey(STORE_TABS_BY_FP, oldFp)
-    }
     await syncSessionLayer({
       tabs: true,
       fingerprints: true,
       containers: Boolean(containerId),
       originalUrls: Boolean(originalUrl),
     })
-    await persistRecordToLayer2(record)
-    await idbPutRecord(STORE_META, { key: 'tab_values', data: mapToRecord(tabValues) })
+    const extraOps: IDBBatchOp[] = [
+      ...pruneOps,
+      { store: STORE_META, type: 'put', value: { key: 'tab_values', data: mapToRecord(tabValues) } },
+    ]
+    if (oldFp) {
+      extraOps.unshift({ store: STORE_TABS_BY_FP, type: 'delete', key: oldFp })
+    }
+    await persistRecordToLayer2(record, extraOps)
   })
 }
 
@@ -1009,10 +1108,15 @@ function findMatchedCacheFromWindows(
 ): Record<ID, T.TabCache> | undefined {
   if (!data.length || !tabs.length) return undefined
 
+  const tabNorms: string[] = new Array(tabs.length)
+  for (let i = 0; i < tabs.length; i++) {
+    tabNorms[i] = tabs[i] ? normalizeUrlForFingerprint(tabs[i].url ?? '') : ''
+  }
+
   if (tabs.length === 1) {
     const singleTab = tabs[0]
     if (!singleTab) return undefined
-    const singleNorm = normalizeUrlForFingerprint(singleTab.url ?? '')
+    const singleNorm = tabNorms[0]
     for (const winTabs of data) {
       if (winTabs.length !== 1) continue
       const tabData = winTabs[0]
@@ -1044,7 +1148,7 @@ function findMatchedCacheFromWindows(
       if (!tabData) break
 
       const blindspot = tab.status === 'loading' && (tab.url === 'about:blank' || !tab.url)
-      const tabNorm = normalizeUrlForFingerprint(tab.url ?? '')
+      const tabNorm = tabNorms[tabIndex]
       const cacheNorm = normalizeUrlForFingerprint(tabData.url ?? '')
 
       if (
@@ -1059,8 +1163,7 @@ function findMatchedCacheFromWindows(
           const tabj = tabs[j]
           if (
             tabj &&
-            (tabj.url === tabData.url ||
-              (cacheNorm && normalizeUrlForFingerprint(tabj.url ?? '') === cacheNorm))
+            (tabj.url === tabData.url || (cacheNorm && tabNorms[j] === cacheNorm))
           ) {
             tabIndex = j
             existedTabs[tabj.id] = tabData
@@ -1091,8 +1194,12 @@ function findMatchedCacheFromWindows(
   return result
 }
 
-function isUrlCompatibleForDirectId(nativeTab: T.NativeTab, anchor: TabTreeAnchorRecord): boolean {
-  const nativeNorm = normalizeUrlForFingerprint(nativeTab.url ?? '')
+function isUrlCompatibleForDirectId(
+  nativeTab: T.NativeTab,
+  anchor: TabTreeAnchorRecord,
+  precomputedNativeNorm?: string
+): boolean {
+  const nativeNorm = precomputedNativeNorm ?? normalizeUrlForFingerprint(nativeTab.url ?? '')
   const anchorNorm = anchor.normalizedUrl
   const anchorChromeNorm = anchor.chromeUrl ? normalizeUrlForFingerprint(anchor.chromeUrl) : ''
   const anchorOrigNorm = anchor.originalUrl ? normalizeUrlForFingerprint(anchor.originalUrl) : ''
@@ -1134,13 +1241,35 @@ export async function restoreOrMatchTabsState(
     ? findMatchedCacheFromWindows(nativeTabs, cachedWindows)
     : undefined
 
-  // Build deduplicated pool of anchor candidates
+  // Precompute normalized URLs and titles for nativeTabs once
+  const nativeNormUrls: string[] = new Array(nativeTabs.length)
+  const nativeTitles: string[] = new Array(nativeTabs.length)
+  for (let i = 0; i < nativeTabs.length; i++) {
+    const t = nativeTabs[i]
+    if (t) {
+      nativeNormUrls[i] = normalizeUrlForFingerprint(t.url ?? '')
+      nativeTitles[i] = t.title ?? ''
+    } else {
+      nativeNormUrls[i] = ''
+      nativeTitles[i] = ''
+    }
+  }
+
+  // Build deduplicated pool of anchor candidates and O(1) normalizedUrl index
   const candidatePool: TabTreeAnchorRecord[] = []
+  const candidatesByNormUrl = new Map<string, TabTreeAnchorRecord[]>()
   const seenCandidates = new Set<TabTreeAnchorRecord>()
   const addCandidate = (rec: TabTreeAnchorRecord | undefined) => {
     if (!rec || seenCandidates.has(rec)) return
     seenCandidates.add(rec)
     candidatePool.push(rec)
+    const urlKey = rec.normalizedUrl ?? ''
+    let bucket = candidatesByNormUrl.get(urlKey)
+    if (!bucket) {
+      bucket = []
+      candidatesByNormUrl.set(urlKey, bucket)
+    }
+    bucket.push(rec)
   }
 
   for (const rec of anchorsByTabId.values()) addCandidate(rec)
@@ -1188,7 +1317,11 @@ export async function restoreOrMatchTabsState(
     if (!nativeTab) continue
     const idKey = String(nativeTab.id)
     const direct = anchorsByTabId.get(idKey)
-    if (direct && !usedAnchors.has(direct) && isUrlCompatibleForDirectId(nativeTab, direct)) {
+    if (
+      direct &&
+      !usedAnchors.has(direct) &&
+      isUrlCompatibleForDirectId(nativeTab, direct, nativeNormUrls[i])
+    ) {
       matchedAnchors[i] = direct
       usedAnchors.add(direct)
     }
@@ -1200,11 +1333,12 @@ export async function restoreOrMatchTabsState(
     const nativeTab = nativeTabs[i]
     if (!nativeTab) continue
 
+    const normUrl = nativeNormUrls[i]
     const fp = computeFingerprint({
       windowId: nativeTab.windowId,
       index: nativeTab.index ?? i,
-      normalizedUrl: normalizeUrlForFingerprint(nativeTab.url ?? ''),
-      title: nativeTab.title ?? '',
+      normalizedUrl: normUrl,
+      title: nativeTitles[i],
       openerTabId: nativeTab.openerTabId,
     })
 
@@ -1215,7 +1349,8 @@ export async function restoreOrMatchTabsState(
       continue
     }
 
-    const poolMatch = candidatePool.find(c => !usedAnchors.has(c) && c.fingerprint === fp)
+    const urlBucket = candidatesByNormUrl.get(normUrl)
+    const poolMatch = urlBucket?.find(c => !usedAnchors.has(c) && c.fingerprint === fp)
     if (poolMatch) {
       matchedAnchors[i] = poolMatch
       usedAnchors.add(poolMatch)
@@ -1228,23 +1363,29 @@ export async function restoreOrMatchTabsState(
     const nativeTab = nativeTabs[i]
     if (!nativeTab) continue
 
-    const normUrl = normalizeUrlForFingerprint(nativeTab.url ?? '')
-    const title = nativeTab.title ?? ''
+    const normUrl = nativeNormUrls[i]
+    const urlBucket = candidatesByNormUrl.get(normUrl)
+    if (!urlBucket) continue
+
+    const title = nativeTitles[i]
     const targetIdx = nativeTab.index ?? i
+    let bestMatch: TabTreeAnchorRecord | undefined
+    let bestDist = Infinity
 
-    const matches = candidatePool
-      .filter(
-        c =>
-          !usedAnchors.has(c) &&
-          c.windowId === nativeTab.windowId &&
-          c.normalizedUrl === normUrl &&
-          c.title === title
-      )
-      .sort((a, b) => Math.abs(a.index - targetIdx) - Math.abs(b.index - targetIdx))
+    for (let j = 0; j < urlBucket.length; j++) {
+      const c = urlBucket[j]
+      if (usedAnchors.has(c) || c.windowId !== nativeTab.windowId || c.title !== title) continue
+      const dist = Math.abs(c.index - targetIdx)
+      if (dist < bestDist) {
+        bestDist = dist
+        bestMatch = c
+        if (dist === 0) break
+      }
+    }
 
-    if (matches[0]) {
-      matchedAnchors[i] = matches[0]
-      usedAnchors.add(matches[0])
+    if (bestMatch) {
+      matchedAnchors[i] = bestMatch
+      usedAnchors.add(bestMatch)
     }
   }
 
@@ -1254,22 +1395,29 @@ export async function restoreOrMatchTabsState(
     const nativeTab = nativeTabs[i]
     if (!nativeTab) continue
 
-    const normUrl = normalizeUrlForFingerprint(nativeTab.url ?? '')
-    const title = nativeTab.title ?? ''
+    const normUrl = nativeNormUrls[i]
+    const urlBucket = candidatesByNormUrl.get(normUrl)
+    if (!urlBucket) continue
+
+    const title = nativeTitles[i]
     const targetIdx = nativeTab.index ?? i
+    let bestMatch: TabTreeAnchorRecord | undefined
+    let bestDist = Infinity
 
-    const matches = candidatePool
-      .filter(
-        c =>
-          !usedAnchors.has(c) &&
-          c.normalizedUrl === normUrl &&
-          c.title === title
-      )
-      .sort((a, b) => Math.abs(a.index - targetIdx) - Math.abs(b.index - targetIdx))
+    for (let j = 0; j < urlBucket.length; j++) {
+      const c = urlBucket[j]
+      if (usedAnchors.has(c) || c.title !== title) continue
+      const dist = Math.abs(c.index - targetIdx)
+      if (dist < bestDist) {
+        bestDist = dist
+        bestMatch = c
+        if (dist === 0) break
+      }
+    }
 
-    if (matches[0]) {
-      matchedAnchors[i] = matches[0]
-      usedAnchors.add(matches[0])
+    if (bestMatch) {
+      matchedAnchors[i] = bestMatch
+      usedAnchors.add(bestMatch)
     }
   }
 
@@ -1279,30 +1427,34 @@ export async function restoreOrMatchTabsState(
     const nativeTab = nativeTabs[i]
     if (!nativeTab) continue
 
-    const normUrl = normalizeUrlForFingerprint(nativeTab.url ?? '')
+    const normUrl = nativeNormUrls[i]
     if (!normUrl || normUrl === 'about:blank' || normUrl === 'chrome://newtab/') continue
+    const urlBucket = candidatesByNormUrl.get(normUrl)
+    if (!urlBucket) continue
+
+    const title = nativeTitles[i]
     const targetIdx = nativeTab.index ?? i
+    let bestMatch: TabTreeAnchorRecord | undefined
+    let bestWinDiff = Infinity
+    let bestDist = Infinity
 
-    const matches = candidatePool
-      .filter(
-        c =>
-          !usedAnchors.has(c) &&
-          c.normalizedUrl === normUrl &&
-          (!nativeTab.title ||
-            !c.title ||
-            nativeTab.title === nativeTab.url ||
-            nativeTab.title === 'New Tab')
-      )
-      .sort((a, b) => {
-        const winDiffA = a.windowId === nativeTab.windowId ? 0 : 1
-        const winDiffB = b.windowId === nativeTab.windowId ? 0 : 1
-        if (winDiffA !== winDiffB) return winDiffA - winDiffB
-        return Math.abs(a.index - targetIdx) - Math.abs(b.index - targetIdx)
-      })
+    for (let j = 0; j < urlBucket.length; j++) {
+      const c = urlBucket[j]
+      if (usedAnchors.has(c)) continue
+      if (title && c.title && title !== nativeTab.url && title !== 'New Tab') continue
+      const winDiff = c.windowId === nativeTab.windowId ? 0 : 1
+      const dist = Math.abs(c.index - targetIdx)
+      if (winDiff < bestWinDiff || (winDiff === bestWinDiff && dist < bestDist)) {
+        bestWinDiff = winDiff
+        bestDist = dist
+        bestMatch = c
+        if (winDiff === 0 && dist === 0) break
+      }
+    }
 
-    if (matches[0]) {
-      matchedAnchors[i] = matches[0]
-      usedAnchors.add(matches[0])
+    if (bestMatch) {
+      matchedAnchors[i] = bestMatch
+      usedAnchors.add(bestMatch)
     }
   }
 
@@ -1423,12 +1575,13 @@ export async function restoreOrMatchTabsState(
     const existingTv = tabValues.get(newIdKey) ?? {}
     tabValues.set(newIdKey, { ...existingTv, data: toPlainData(sd) })
 
-    const normUrl = normalizeUrlForFingerprint(nativeTab.url ?? '')
+    const normUrl = nativeNormUrls[i]
+    const title = nativeTitles[i]
     const fp = computeFingerprint({
       windowId: nativeTab.windowId,
       index: nativeTab.index ?? i,
       normalizedUrl: normUrl,
-      title: nativeTab.title ?? '',
+      title,
       openerTabId: nativeTab.openerTabId,
     })
     const updatedRecord: TabTreeAnchorRecord = {
@@ -1446,7 +1599,7 @@ export async function restoreOrMatchTabsState(
       windowId: nativeTab.windowId,
       index: nativeTab.index ?? i,
       normalizedUrl: normUrl,
-      title: nativeTab.title ?? '',
+      title,
       openerTabId: nativeTab.openerTabId,
       pinned: nativeTab.pinned,
       updatedAt: Date.now(),
@@ -1458,21 +1611,22 @@ export async function restoreOrMatchTabsState(
   }
 
   if (runtimeMapsChanged) {
+    const pruneOps = pruneBoundedCaches()
     await enqueuePersist(async () => {
       await syncSessionLayer()
-      let allIdbOk = true
+      const ops: IDBBatchOp[] = [...pruneOps]
       for (const rec of updatedRecordsToPersist) {
-        const [w1, w2] = await Promise.all([
-          idbPutRecord(STORE_TABS_BY_ID, rec),
-          idbPutRecord(STORE_TABS_BY_FP, rec),
-        ])
-        if (!w1 || !w2) allIdbOk = false
+        ops.push({ store: STORE_TABS_BY_ID, type: 'put', value: rec })
+        if (rec.fingerprint) {
+          ops.push({ store: STORE_TABS_BY_FP, type: 'put', value: rec })
+        }
       }
-      const wroteMeta = await idbPutRecord(STORE_META, {
-        key: 'tab_values',
-        data: mapToRecord(tabValues),
+      ops.push({
+        store: STORE_META,
+        type: 'put',
+        value: { key: 'tab_values', data: mapToRecord(tabValues) },
       })
-      if (!wroteMeta) allIdbOk = false
+      const allIdbOk = await idbRunBatch(ops)
       await syncDurableMirror(!allIdbOk)
     })
   }

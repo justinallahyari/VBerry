@@ -151,21 +151,15 @@ async function getAnchorModule(): Promise<AnchorModuleLike | null> {
   return anchorModulePromise
 }
 
-let settingsModulePromise: Promise<SettingsModuleLike | null> | null = null
-function getSettingsModule(): Promise<SettingsModuleLike | null> {
-  if (!settingsModulePromise) {
-    settingsModulePromise = import('src/services/settings')
-      .then(m => m as unknown as SettingsModuleLike)
-      .catch(() => null)
-  }
-  return settingsModulePromise
+function getSettingsState(): SettingsModuleLike['state'] | undefined {
+  return (globalThis as any).__sideberySettingsState
 }
 
 async function isSyncContainersTabGroupsEnabled(): Promise<boolean> {
-  const mod = await getSettingsModule()
+  const state = getSettingsState()
   const stateVal =
-    mod?.state && typeof mod.state.syncContainersTabGroups === 'boolean'
-      ? mod.state.syncContainersTabGroups
+    state && typeof state.syncContainersTabGroups === 'boolean'
+      ? state.syncContainersTabGroups
       : undefined
 
   if (stateVal !== undefined) return stateVal
@@ -180,6 +174,32 @@ function resolveColorCode(color?: string): string {
 export function mapColorToChromeTabGroupColor(color?: string): ChromeTabGroupColor {
   if (!color) return 'grey'
   return CHROME_GROUP_COLOR_MAP[color] ?? 'grey'
+}
+
+function isTransientTabEditError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : typeof err === 'string' ? err : ''
+  const lower = msg.toLowerCase()
+  return lower.includes('cannot be edited right now') || lower.includes('dragging')
+}
+
+export async function withTabEditRetry<T>(
+  op: () => Promise<T>,
+  attempts = 3,
+  delayMs = 50
+): Promise<T> {
+  let lastErr: unknown
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await op()
+    } catch (err) {
+      lastErr = err
+      if (i + 1 >= attempts || !isTransientTabEditError(err)) {
+        throw err
+      }
+      await new Promise(resolve => setTimeout(resolve, delayMs))
+    }
+  }
+  throw lastErr
 }
 
 function normalizeContainerRecord(id: string, raw: Partial<ContainerContract>): ContainerContract {
@@ -324,9 +344,8 @@ function attachListeners(): void {
         if (changes.settings?.newValue && typeof changes.settings.newValue.syncContainersTabGroups === 'boolean') {
           const val = changes.settings.newValue.syncContainersTabGroups
           lastStorageSyncContainers = val
-          void getSettingsModule().then(mod => {
-            if (mod?.state) mod.state.syncContainersTabGroups = val
-          })
+          const state = getSettingsState()
+          if (state) state.syncContainersTabGroups = val
         }
       } else if (area === 'session' && changes[SESSION_TAB_CONTAINERS_KEY]) {
         const nextMap = changes[SESSION_TAB_CONTAINERS_KEY].newValue
@@ -552,18 +571,22 @@ export async function syncTabWithNativeTabGroup(
     const matched = existingGroups.find(g => g.title === title)
 
     if (matched) {
-      await chromeApi.tabs.group({ groupId: matched.id, tabIds: [numericTabId] })
+      await withTabEditRetry(() =>
+        chromeApi.tabs.group({ groupId: matched.id, tabIds: [numericTabId] })
+      )
       if (matched.color !== color) {
-        await chromeApi.tabGroups.update(matched.id, { title, color })
+        await withTabEditRetry(() => chromeApi.tabGroups.update(matched.id, { title, color }))
       }
       return matched.id
     }
 
-    const groupId: number = await chromeApi.tabs.group({
-      createProperties: { windowId: numericWinId },
-      tabIds: [numericTabId],
-    })
-    await chromeApi.tabGroups.update(groupId, { title, color })
+    const groupId: number = await withTabEditRetry(() =>
+      chromeApi.tabs.group({
+        createProperties: { windowId: numericWinId },
+        tabIds: [numericTabId],
+      })
+    )
+    await withTabEditRetry(() => chromeApi.tabGroups.update(groupId, { title, color }))
     return groupId
   } catch {
     return undefined
@@ -587,4 +610,5 @@ export const ContainerBridge = {
   setTabCookieStoreId,
   syncTabWithNativeTabGroup,
   mapColorToChromeTabGroupColor,
+  withTabEditRetry,
 }

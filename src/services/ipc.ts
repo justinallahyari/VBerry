@@ -489,7 +489,7 @@ function getConnectionPortWithoutError(con?: ConnectionInfo) {
 }
 
 function getPortErrorMessage(con?: ConnectionInfo) {
-  const msg = con?.localPort?.error?.message ?? con?.localPort?.error?.message
+  const msg = con?.localPort?.error?.message ?? con?.remotePort?.error?.message
   return msg ? '\n  Port error: ' + msg : ''
 }
 
@@ -643,12 +643,14 @@ export function broadcast<T extends InstanceType, A extends ActionsKeys<T>>(
  * Handles connection event.
  */
 function onConnect(port: browser.runtime.Port) {
+  if (!port?.name || !port.name.startsWith('{')) return
   let portNameData: PortNameData | undefined
   try {
     portNameData = JSON.parse(port.name) as PortNameData
   } catch {
-    return Logs.err('IPC.onConnect: Cannot parse PortName')
+    return
   }
+  if (!portNameData || portNameData.dstType === undefined) return
   if (portNameData.dstType !== _localType) return
   if (portNameData.dstWinId !== undefined && portNameData.dstWinId !== _localWinId) return
 
@@ -852,7 +854,7 @@ async function onPostMsg<T extends InstanceType, A extends keyof Actions>(
     if (waiting) {
       clearTimeout(waiting.timeout)
       if (waiting.ok) waiting.ok()
-      msgsWaitingForAnswer.delete(-1)
+      msgsWaitingForAnswer.delete(msg as number)
     }
     return
   }
@@ -934,6 +936,8 @@ async function onPostMsg<T extends InstanceType, A extends keyof Actions>(
  * and sends result back.
  */
 function onSendMsg<T extends InstanceType, A extends keyof Actions>(msg: Message<T, A>) {
+  if (!msg || typeof msg !== 'object' || (!msg.action && msg.id === undefined)) return
+
   // Check if this instance is the correct destination
   if (msg.dstWinId !== undefined && msg.dstWinId !== _localWinId) return
   if (msg.dstType !== undefined && msg.dstType !== _localType) return

@@ -45,14 +45,32 @@ export async function loadFaviconsData() {
   }
 }
 
-export const SIZE = Math.trunc(16 * window.devicePixelRatio)
-const THRESHOLD_BYTES_DIFF = 150 * window.devicePixelRatio
+const dpr = typeof window !== 'undefined' && window.devicePixelRatio ? window.devicePixelRatio : 1
+export const SIZE = Math.trunc(16 * dpr)
+const THRESHOLD_BYTES_DIFF = 150 * dpr
 
 let favRescaleCanvas: HTMLCanvasElement | undefined
 let favPrescaleCanvas: HTMLCanvasElement | undefined
 let favRescaleCanvasCtx: CanvasRenderingContext2D | null = null
 let favPrescaleCanvasCtx: CanvasRenderingContext2D | null = null
 let favRescaleImg: HTMLImageElement | undefined
+
+function dataUriToBlob(dataUri: string): Blob | undefined {
+  const commaIndex = dataUri.indexOf(',')
+  if (commaIndex === -1) return
+  const meta = dataUri.slice(5, commaIndex)
+  const rawData = dataUri.slice(commaIndex + 1)
+  const mime = meta.split(';')[0] || 'image/png'
+  if (meta.includes(';base64')) {
+    const binStr = atob(rawData)
+    const bytes = new Uint8Array(binStr.length)
+    for (let i = 0; i < binStr.length; i++) {
+      bytes[i] = binStr.charCodeAt(i)
+    }
+    return new Blob([bytes], { type: mime })
+  }
+  return new Blob([decodeURIComponent(rawData)], { type: mime })
+}
 
 export async function resizeFavicon(fav: DataUriImage): Promise<DataUriImage> {
   const favIsSVG = Utils.isSvg(fav)
@@ -73,6 +91,53 @@ export async function resizeFavicon(fav: DataUriImage): Promise<DataUriImage> {
 
   // Prescale size
   const ds = SIZE * 2
+
+  if (typeof document === 'undefined' || typeof Image === 'undefined') {
+    if (typeof OffscreenCanvas === 'undefined' || typeof createImageBitmap !== 'function') {
+      return fav
+    }
+    try {
+      const blob = dataUriToBlob(fav)
+      if (!blob) return fav
+      const bitmap = await createImageBitmap(blob)
+      try {
+        const sw = bitmap.width
+        const sh = bitmap.height
+        if (sw === 0 || sh === 0) return fav
+
+        const rescaleCanvas = new OffscreenCanvas(SIZE, SIZE)
+        const rescaleCtx = rescaleCanvas.getContext('2d')
+        if (!rescaleCtx) return fav
+
+        if (!favIsSVG && sw > ds) {
+          const prescaleCanvas = new OffscreenCanvas(ds, ds)
+          const prescaleCtx = prescaleCanvas.getContext('2d')
+          if (prescaleCtx) {
+            prescaleCtx.drawImage(bitmap, 0, 0, sw, sh, 0, 0, ds, ds)
+            rescaleCtx.drawImage(prescaleCanvas, 0, 0, ds, ds, 0, 0, SIZE, SIZE)
+          } else {
+            rescaleCtx.drawImage(bitmap, 0, 0, sw, sh, 0, 0, SIZE, SIZE)
+          }
+        } else {
+          rescaleCtx.drawImage(bitmap, 0, 0, sw, sh, 0, 0, SIZE, SIZE)
+        }
+
+        const outBlob = await rescaleCanvas.convertToBlob({ type: 'image/png' })
+        const outBytes = new Uint8Array(await outBlob.arrayBuffer())
+        let bin = ''
+        for (let i = 0; i < outBytes.length; i++) {
+          bin += String.fromCharCode(outBytes[i])
+        }
+        const newBase64fav = 'data:image/png;base64,' + btoa(bin)
+        if (newBase64fav.length + THRESHOLD_BYTES_DIFF >= fav.length) return fav
+        return newBase64fav
+      } finally {
+        bitmap.close()
+      }
+    } catch {
+      return fav
+    }
+  }
 
   if (!favRescaleCanvas || !favRescaleCanvasCtx) {
     favRescaleCanvas = Utils.createCanvas(SIZE, SIZE)

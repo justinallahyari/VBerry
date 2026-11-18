@@ -5,6 +5,7 @@ import * as Info from 'src/services/info'
 import * as Logs from 'src/services/logs'
 
 export let state = Utils.clone(DEFAULT_SETTINGS)
+;(globalThis as any).__sideberySettingsState = state
 
 export let updateWinPrefaceOnPanelSwitch = false
 export let initSaveNeeded = false
@@ -32,6 +33,7 @@ export let tabsTitleLinesMax = 1
 
 export function reactivate(r: Reactivator<SettingsState>) {
   state = r(state)
+  ;(globalThis as any).__sideberySettingsState = state
 }
 
 export async function load(): Promise<void> {

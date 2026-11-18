@@ -65,6 +65,13 @@ async function storeSet(values: Stored): Promise<void> {
 }
 
 async function getStoredKeys<K extends keyof Stored>(...keys: K[]): Promise<Partial<Stored>> {
+  if (!keys.length) return {}
+  try {
+    const batch = await browser.storage.local.get<Stored>(keys.length === 1 ? keys[0] : keys)
+    if (batch && typeof batch === 'object') return batch
+  } catch {
+    // Fallback to per-key reads if batch call fails
+  }
   const results = await Promise.all(
     keys.map(k =>
       browser.storage.local

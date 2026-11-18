@@ -71,7 +71,7 @@ export function asap(cb: T.AnyFunc, delay: number): FuncCtx {
       if (ctx.busy) return
       ctx.busy = true
 
-      if (!delay && window.requestAnimationFrame) {
+      if (!delay && typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
         window.requestAnimationFrame(() => {
           cb(a)
           ctx.busy = false
@@ -320,13 +320,13 @@ export function toRGBA(color?: string | T.RGB | T.RGBA | null): T.RGBA | undefin
     const g = rgba[2]
     let gn = parseInt(g)
     if (isNaN(gn)) return
-    if (g.endsWith('%')) gn = Math.round((rn / 100) * 255)
+    if (g.endsWith('%')) gn = Math.round((gn / 100) * 255)
     if (gn > 255) gn = 255
 
     const b = rgba[3]
     let bn = parseInt(b)
     if (isNaN(bn)) return
-    if (b.endsWith('%')) bn = Math.round((rn / 100) * 255)
+    if (b.endsWith('%')) bn = Math.round((bn / 100) * 255)
     if (bn > 255) bn = 255
 
     const a = rgba[5]

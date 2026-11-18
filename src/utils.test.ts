@@ -293,3 +293,10 @@ describe('Utils.clone()', () => {
     expect(clone.set.size).toBe(2)
   })
 })
+
+describe('Utils.toRGBA()', () => {
+  test('computes independent R, G, and B percentage channels accurately', () => {
+    expect(Utils.toRGBA('rgba(10%, 50%, 100%, 50%)')).toEqual([26, 128, 255, 0.5])
+    expect(Utils.toRGBA('rgb(0%, 100%, 20%)')).toEqual([0, 255, 51, 1])
+  })
+})

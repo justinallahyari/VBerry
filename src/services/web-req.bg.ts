@@ -119,6 +119,10 @@ export function updateReqHandlers(): void {
   excludeHostsRules = {}
   proxyAuthCredentials = {}
   pendingProxyAuthRequests.clear()
+  for (const timeout of proxyAuthErrorHandlerTimeouts.values()) {
+    clearTimeout(timeout)
+  }
+  proxyAuthErrorHandlerTimeouts.clear()
   userAgents = {}
 
   // Check containers config
@@ -220,7 +224,7 @@ export function updateReqHandlersDebounced(delay = 500): void {
 function proxyReqHandler(info: browser.proxy.RequestDetails): browser.proxy.ProxyInfoResult {
   if (!Tabs.byId) return
 
-  const tab = Tabs.byId[info.tabId]
+  const tab = info.tabId !== undefined && Number(info.tabId) >= 0 ? Tabs.byId[info.tabId] : undefined
 
   // Proxify requests for checking ip and other info
   if (!tab && ipCheckCtx && info.type === 'xmlhttprequest') {
@@ -311,6 +315,7 @@ function proxyAuthCompletedHandler(info: browser.webRequest.ReqDetails) {
 
 function proxyAuthWithErrorHandler(info: browser.webRequest.ErrReqDetails) {
   if (!pendingProxyAuthRequests.has(info.requestId)) return
+  pendingProxyAuthRequests.delete(info.requestId)
   proxyAuthErrorHandlerDebounced(info.cookieStoreId, info.error, 640)
 }
 
@@ -319,6 +324,7 @@ function proxyAuthErrorHandlerDebounced(containerId: string, error: string, dela
   let timeout = proxyAuthErrorHandlerTimeouts.get(containerId)
   clearTimeout(timeout)
   timeout = setTimeout(() => {
+    proxyAuthErrorHandlerTimeouts.delete(containerId)
     Logs.warn(`WebReq.proxyAuthWithErrorHandler: ${error}`)
     IPC.sendToLastFocusedSidebar('notifyAboutWrongProxyAuthData', containerId)
   }, delay)
@@ -326,6 +332,7 @@ function proxyAuthErrorHandlerDebounced(containerId: string, error: string, dela
 }
 function cancelDebouncedProxyAuthErrorHandler(containerId: string) {
   clearTimeout(proxyAuthErrorHandlerTimeouts.get(containerId))
+  proxyAuthErrorHandlerTimeouts.delete(containerId)
 }
 
 function turnOnReqHandler(): void {

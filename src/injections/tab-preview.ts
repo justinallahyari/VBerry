@@ -1,7 +1,8 @@
 import { InstanceType } from 'src/enums'
-import { NOID } from 'src/defaults'
 import * as IPC from 'src/services/ipc'
 import * as Logs from 'src/services/logs'
+
+const NOID: ID = -1
 
 export interface TabPreviewInitData {
   bg: string | undefined | null
@@ -29,8 +30,8 @@ const Y_OFFSET = -24
 const MARGIN = 2
 
 const state = {
-  tabId: NOID,
-  winId: NOID,
+  tabId: NOID as ID,
+  winId: NOID as ID,
   unloaded: false,
 
   rootEl: null as HTMLElement | null,
