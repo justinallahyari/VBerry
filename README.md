@@ -46,3 +46,7 @@ The [`vivaldi css hacks/`](./vivaldi%20css%20hacks) folder contains optional Viv
 ## Credits
 
 Forked from [mbnuqw/sidebery](https://github.com/mbnuqw/sidebery).
+
+## License
+
+Licensed under the [MIT License](./LICENSE).
