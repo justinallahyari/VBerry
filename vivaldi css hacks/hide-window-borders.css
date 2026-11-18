@@ -1,0 +1,59 @@
+/*
+ * Vivaldi Custom UI CSS — Edge-to-Edge Right & Bottom Window Borders
+ * Removes only the right and bottom window borders/padding on the webpage
+ * viewport and panels container, and halves the gap between them to 3px.
+ */
+
+#main > .inner {
+  padding-right: 0 !important;
+  padding-bottom: 0 !important;
+  margin-right: 0 !important;
+  margin-bottom: 0 !important;
+  gap: 0 !important;
+}
+
+#webview-container,
+.webpageview,
+.webpageview .webpage {
+  margin-left: 0 !important;
+  padding-left: 0 !important;
+}
+
+#webpage-stack,
+#browser.ui-rounded #webpage-stack {
+  margin-left: 3px !important;
+  padding-left: 0 !important;
+}
+
+#webview-container,
+#webpage-stack,
+.webpageview,
+.webpageview .webpage,
+#browser.ui-rounded #webpage-stack,
+#browser.ui-rounded #webview-container,
+#browser.ui-rounded .webpageview {
+  margin-right: 0 !important;
+  margin-bottom: 0 !important;
+  padding-right: 0 !important;
+  padding-bottom: 0 !important;
+  border-right: none !important;
+  border-bottom: none !important;
+  border-top-right-radius: 0 !important;
+  border-bottom-right-radius: 0 !important;
+  border-bottom-left-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+/* Remove bottom border/padding on the panels container and webpanel wrappers */
+#panels-container,
+#panels-container #panels,
+#panels-container .panel-group,
+#panels-container #ui-region-panel,
+#panels-container .webpanel-stack,
+#panels-container .panel.webpanel {
+  border-bottom: none !important;
+  padding-bottom: 0 !important;
+  margin-bottom: 0 !important;
+  border-bottom-left-radius: 0 !important;
+  border-bottom-right-radius: 0 !important;
+}

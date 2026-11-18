@@ -34,6 +34,7 @@ The [`vivaldi css hacks/`](./vivaldi%20css%20hacks) folder contains optional Viv
 
 - `hide-panel-switch.css` — Hides Vivaldi's vertical panel icon strip (`#switch`) and removes the reserved `41px` gap when the panel is open, while collapsing the container completely when closed.
 - `hide-webpanel-header.css` — Hides the Web Panel top toolbar (URL title, Back/Forward/Reload/Home, Close) so VBerry fills the full panel height.
+- `hide-window-borders.css` — Removes the borders, margins, padding, and rounded-corner frame around `#webview-container` / `#webpage-stack` on the right and bottom of the window.
 
 ### How to enable the Vivaldi CSS mods
 
