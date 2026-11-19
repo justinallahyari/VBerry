@@ -1,4 +1,5 @@
 import {
+  DEFAULT_PANEL_SHORTCUTS,
   DEFAULT_SETTINGS,
   type SavedPanel,
   type Settings,
@@ -14,6 +15,7 @@ export const STORAGE_KEYS = {
   virtualGroups: 'vberry_virtual_groups',
   lastSession: 'vberry_last_session',
   sessionRestored: 'vberry_session_restored',
+  pendingCommand: 'vberry_pending_command',
 } as const
 
 /**
@@ -34,9 +36,21 @@ export function toArray<T>(value: unknown): T[] {
   return []
 }
 
+function normalizeSettings(raw: unknown): Settings {
+  const obj = (raw && typeof raw === 'object' ? raw : {}) as Partial<Settings>
+  return {
+    ...DEFAULT_SETTINGS,
+    ...obj,
+    panelShortcuts: {
+      ...DEFAULT_PANEL_SHORTCUTS,
+      ...(obj.panelShortcuts ?? {}),
+    },
+  }
+}
+
 export async function loadSettings(): Promise<Settings> {
   const res = await chrome.storage.local.get(STORAGE_KEYS.settings)
-  return { ...DEFAULT_SETTINGS, ...(res[STORAGE_KEYS.settings] ?? {}) }
+  return normalizeSettings(res[STORAGE_KEYS.settings])
 }
 
 export async function saveSettings(patch: Partial<Settings>): Promise<Settings> {
@@ -62,6 +76,88 @@ export async function loadSnapshots(): Promise<VBerrySnapshot[]> {
 
 export async function saveSnapshots(snapshots: VBerrySnapshot[]): Promise<void> {
   await chrome.storage.local.set({ [STORAGE_KEYS.snapshots]: toPlain(Array.from(snapshots)) })
+}
+
+let sessionLockChain: Promise<unknown> = Promise.resolve()
+
+/**
+ * Serialize read-modify-write operations on chrome.storage.session so bursty
+ * Chrome events (bulk discard onReplaced, bulk close onRemoved, bulk onCreated)
+ * can never read stale state and overwrite each other.
+ */
+export function withSessionLock<T>(fn: () => Promise<T>): Promise<T> {
+  const next = sessionLockChain.then(fn, fn)
+  sessionLockChain = next.catch(() => {})
+  return next
+}
+
+export async function updateTreeMeta(
+  updater: (meta: TabTreeMap) => TabTreeMap | null
+): Promise<TabTreeMap> {
+  return withSessionLock(async () => {
+    const current = await loadTreeMeta()
+    const next = updater({ ...current })
+    if (next === null) return current
+    await saveTreeMeta(next)
+    return next
+  })
+}
+
+export async function updateVirtualGroupMap(
+  updater: (map: Record<number, string>) => Record<number, string> | null
+): Promise<Record<number, string>> {
+  return withSessionLock(async () => {
+    const current = await loadVirtualGroupMap()
+    const next = updater({ ...current })
+    if (next === null) return current
+    await saveVirtualGroupMap(next)
+    return next
+  })
+}
+
+/**
+ * Atomically remap tab IDs in both `treeMeta` (entry keys + all `parentId` pointers,
+ * including unfolded root parents) and `virtualGroups` after Chrome replaces tab IDs
+ * on `chrome.tabs.discard()` or prerender swap.
+ */
+export async function remapReplacedTabIds(remaps: Map<number, number>): Promise<void> {
+  if (remaps.size === 0) return
+  await withSessionLock(async () => {
+    const [meta, vmap] = await Promise.all([loadTreeMeta(), loadVirtualGroupMap()])
+
+    // Resolve chains (e.g. A -> B -> C) to final target IDs
+    const resolve = (id: number): number => {
+      let cur = id
+      let guard = 0
+      while (remaps.has(cur) && guard++ < 10) cur = remaps.get(cur)!
+      return cur
+    }
+
+    let metaChanged = false
+    const nextMeta: TabTreeMap = {}
+    for (const [keyStr, entry] of Object.entries(meta)) {
+      const oldKey = Number(keyStr)
+      const newKey = resolve(oldKey)
+      const oldParent = entry.parentId
+      const newParent = oldParent !== undefined ? resolve(oldParent) : undefined
+      if (newKey !== oldKey || newParent !== oldParent) metaChanged = true
+      nextMeta[newKey] = newParent !== undefined ? { ...entry, parentId: newParent } : { ...entry }
+    }
+
+    let vmapChanged = false
+    const nextVmap: Record<number, string> = {}
+    for (const [keyStr, panelId] of Object.entries(vmap)) {
+      const oldKey = Number(keyStr)
+      const newKey = resolve(oldKey)
+      if (newKey !== oldKey) vmapChanged = true
+      nextVmap[newKey] = panelId
+    }
+
+    await Promise.all([
+      metaChanged ? saveTreeMeta(nextMeta) : Promise.resolve(),
+      vmapChanged ? saveVirtualGroupMap(nextVmap) : Promise.resolve(),
+    ])
+  })
 }
 
 export async function loadTreeMeta(): Promise<TabTreeMap> {
@@ -118,7 +214,7 @@ export async function loadInitialSidepanelState(): Promise<{
       .catch(() => ({}) as Record<string, unknown>),
   ])
   return {
-    settings: { ...DEFAULT_SETTINGS, ...(localRes[STORAGE_KEYS.settings] ?? {}) },
+    settings: normalizeSettings(localRes[STORAGE_KEYS.settings]),
     savedPanels: toArray<SavedPanel>(localRes[STORAGE_KEYS.savedPanels]),
     treeMeta: (sessionRes[STORAGE_KEYS.treeMeta] as TabTreeMap) ?? {},
     virtualGroups: (sessionRes[STORAGE_KEYS.virtualGroups] as Record<number, string>) ?? {},

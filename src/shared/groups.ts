@@ -14,11 +14,12 @@ import {
   loadSnapshots,
   loadTreeMeta,
   loadVirtualGroupMap,
+  remapReplacedTabIds,
   saveSavedPanels,
   saveSnapshots,
-  saveTreeMeta,
-  saveVirtualGroupMap,
   uid,
+  updateTreeMeta,
+  updateVirtualGroupMap,
 } from './storage'
 import { createNewTab, getTargetWindowId, isVivaldi } from './env'
 import { buildTabTree } from './tree'
@@ -64,13 +65,13 @@ export async function assignTabsToVirtualGroup(
   tabIds: number[],
   savedPanelId: string | null
 ): Promise<Record<number, string>> {
-  const map = await loadVirtualGroupMap()
-  for (const id of tabIds) {
-    if (savedPanelId === null) delete map[id]
-    else map[id] = savedPanelId
-  }
-  await saveVirtualGroupMap(map)
-  return map
+  return updateVirtualGroupMap(map => {
+    for (const id of tabIds) {
+      if (savedPanelId === null) delete map[id]
+      else map[id] = savedPanelId
+    }
+    return map
+  })
 }
 
 async function unpinTabs(tabIds: number[]): Promise<void> {
@@ -301,11 +302,18 @@ export async function discardTabs(
     }
   }
 
+  const toDiscard = tabIds.filter(id => !tabById.get(id)?.discarded)
+  const remaps = new Map<number, number>()
   await Promise.allSettled(
-    tabIds
-      .filter(id => !tabById.get(id)?.discarded)
-      .map(id => chrome.tabs.discard(id))
+    toDiscard.map(async oldId => {
+      const discarded = await chrome.tabs.discard(oldId)
+      if (discarded?.id !== undefined && discarded.id !== oldId) {
+        remaps.set(oldId, discarded.id)
+      }
+    })
   )
+  // Atomically remap all replaced tab IDs so bulk discarding never flattens tab trees
+  await remapReplacedTabIds(remaps)
 }
 
 /**
@@ -488,8 +496,7 @@ export async function restoreSnapshotGroup(
   }
 
   if (Object.keys(metaPatch).length) {
-    const existingMeta = await loadTreeMeta()
-    await saveTreeMeta({ ...existingMeta, ...metaPatch })
+    await updateTreeMeta(existingMeta => ({ ...existingMeta, ...metaPatch }))
   }
 
   if (createdIds.length && !group.ungrouped) {

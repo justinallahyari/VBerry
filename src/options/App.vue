@@ -2,10 +2,13 @@
 import { onMounted, ref } from 'vue'
 import {
   CHROME_GROUP_COLORS,
+  DEFAULT_PANEL_SHORTCUTS,
   DEFAULT_SETTINGS,
   type ChromeGroupColor,
+  type PanelShortcuts,
   type SavedPanel,
   type Settings,
+  type WebpageSearchMode,
 } from '@/shared/types'
 import {
   downloadTextFile,
@@ -18,6 +21,7 @@ import {
   uid,
 } from '@/shared/storage'
 import { isVivaldi } from '@/shared/env'
+import { formatKeyEvent } from '@/shared/search'
 import {
   executeImport,
   exportBackupJson,
@@ -29,7 +33,77 @@ import {
 const settings = ref<Settings>({ ...DEFAULT_SETTINGS })
 const savedPanels = ref<SavedPanel[]>([])
 const commands = ref<chrome.commands.Command[]>([])
+const recordingShortcut = ref<keyof PanelShortcuts | null>(null)
+const hasOverlayPermission = ref(false)
+const overlayPermissionError = ref('')
 const statusMsg = ref('')
+
+async function refreshOverlayPermission() {
+  try {
+    hasOverlayPermission.value = await chrome.permissions.contains({ origins: ['<all_urls>'] })
+  } catch {
+    hasOverlayPermission.value = false
+  }
+}
+
+async function selectWebpageSearchMode(mode: WebpageSearchMode) {
+  overlayPermissionError.value = ''
+  if (mode === 'overlay' && !hasOverlayPermission.value) {
+    try {
+      const granted = await chrome.permissions.request({ origins: ['<all_urls>'] })
+      hasOverlayPermission.value = granted
+      if (!granted) {
+        overlayPermissionError.value =
+          'Website access permission was not granted — keeping Floating Popup mode.'
+        return
+      }
+    } catch {
+      overlayPermissionError.value = 'Could not request website access permission in this browser.'
+      return
+    }
+  }
+  await updateSetting('webpageSearchMode', mode)
+}
+
+async function revokeOverlayPermission() {
+  try {
+    await chrome.permissions.remove({ origins: ['<all_urls>'] })
+  } catch {
+    // Ignore
+  }
+  await refreshOverlayPermission()
+  if (!hasOverlayPermission.value && settings.value.webpageSearchMode === 'overlay') {
+    await updateSetting('webpageSearchMode', 'popup')
+  }
+}
+
+const PANEL_SHORTCUT_ROWS: Array<{ key: keyof PanelShortcuts; label: string }> = [
+  { key: 'tabs', label: 'Quick Search Tabs' },
+  { key: 'bookmarks', label: 'Quick Search Bookmarks' },
+  { key: 'history', label: 'Quick Search History' },
+]
+
+async function onRecordPanelShortcut(key: keyof PanelShortcuts, e: KeyboardEvent) {
+  e.preventDefault()
+  e.stopPropagation()
+  if (e.key === 'Escape') {
+    recordingShortcut.value = null
+    return
+  }
+  if (e.key === 'Backspace' || e.key === 'Delete') {
+    await updateSetting('panelShortcuts', { ...settings.value.panelShortcuts, [key]: '' })
+    recordingShortcut.value = null
+    return
+  }
+  const formatted = formatKeyEvent(e)
+  if (!formatted) return
+  await updateSetting('panelShortcuts', { ...settings.value.panelShortcuts, [key]: formatted })
+  recordingShortcut.value = null
+}
+
+async function resetPanelShortcuts() {
+  await updateSetting('panelShortcuts', { ...DEFAULT_PANEL_SHORTCUTS })
+}
 
 // Import state
 const importPreview = ref<ImportPreview | null>(null)
@@ -63,7 +137,12 @@ async function openShortcutsPage() {
 }
 
 async function load() {
-  const [s, p] = await Promise.all([loadSettings(), loadSavedPanels(), loadCommands()])
+  const [s, p] = await Promise.all([
+    loadSettings(),
+    loadSavedPanels(),
+    loadCommands(),
+    refreshOverlayPermission(),
+  ])
   settings.value = s
   savedPanels.value = p
   applyTheme(s)
@@ -441,19 +520,174 @@ onMounted(() => {
       </div>
     </section>
 
-    <!-- Keyboard Shortcuts (Chrome / Vivaldi native extension commands) -->
+    <!-- Search Behavior -->
+    <section class="card">
+      <h2>Search Behavior</h2>
+
+      <div class="setting-row">
+        <div>
+          <div class="label">Quick Search Mode</div>
+          <div class="desc">
+            Quick Search shortcuts always open this view (whether focused on a webpage or the
+            VBerry sidebar) for a consistent experience.
+          </div>
+        </div>
+        <div class="seg-toggle" role="group" aria-label="Quick Search Mode">
+          <button
+            type="button"
+            class="seg-btn"
+            :class="{ active: settings.webpageSearchMode === 'popup' }"
+            @click="selectWebpageSearchMode('popup')"
+          >
+            Floating Popup
+          </button>
+          <button
+            type="button"
+            class="seg-btn"
+            :class="{ active: settings.webpageSearchMode === 'overlay' }"
+            @click="selectWebpageSearchMode('overlay')"
+          >
+            In-Page Spotlight Overlay
+          </button>
+        </div>
+      </div>
+
+      <div class="mode-note">
+        <p v-if="settings.webpageSearchMode === 'popup'">
+          <strong>Floating Popup:</strong> Opens a compact centered VBerry window that focuses
+          search immediately and closes on Enter, Esc, or clicking away. Works everywhere in
+          Chrome &amp; Vivaldi with no extra permissions.
+        </p>
+        <p v-else>
+          <strong>In-Page Spotlight Overlay:</strong> Renders a VBerry Quick Search modal directly
+          over the active webpage (with Tab Trees and Bookmark Trees). Automatically falls back to
+          the Floating Popup on restricted browser pages (<code>chrome://</code>,
+          <code>vivaldi://</code>, New Tab, Web Store) or if the browser blocks moving focus to the
+          page.
+        </p>
+        <p class="perm-note">
+          <strong>Additional permission required for In-Page Spotlight Overlay:</strong>
+          Injecting the overlay onto webpages requires optional website access
+          (<code>&lt;all_urls&gt;</code>).
+          <template v-if="hasOverlayPermission">
+            <span class="perm-badge granted">Granted</span>
+            <button type="button" class="btn-link" @click="revokeOverlayPermission">Revoke</button>
+          </template>
+          <template v-else>
+            <span class="perm-badge">Not granted</span>
+            <button
+              v-if="settings.webpageSearchMode === 'overlay'"
+              type="button"
+              class="btn-link"
+              @click="selectWebpageSearchMode('overlay')"
+            >
+              Grant Permission
+            </button>
+          </template>
+        </p>
+        <p v-if="overlayPermissionError" class="perm-error">{{ overlayPermissionError }}</p>
+      </div>
+
+      <label class="setting-row check-row">
+        <div>
+          <div class="label">Focus search when switching panels</div>
+          <div class="desc">Automatically focus the search box whenever you switch to Tabs, Bookmarks, or History.</div>
+        </div>
+        <input
+          type="checkbox"
+          :checked="settings.focusSearchOnPanelSwitch"
+          @change="updateSetting('focusSearchOnPanelSwitch', ($event.target as HTMLInputElement).checked)"
+        />
+      </label>
+
+      <label class="setting-row check-row">
+        <div>
+          <div class="label">Auto-highlight top search match</div>
+          <div class="desc">Show the selector border on the most likely match as you type (navigate with ↑/↓ and Enter).</div>
+        </div>
+        <input
+          type="checkbox"
+          :checked="settings.autoHighlightSearchMatch"
+          @change="updateSetting('autoHighlightSearchMatch', ($event.target as HTMLInputElement).checked)"
+        />
+      </label>
+
+      <label class="setting-row check-row">
+        <div>
+          <div class="label">Search tabs across all groups</div>
+          <div class="desc">Search all unpinned tabs in the window; turn off to filter only the active group.</div>
+        </div>
+        <input
+          type="checkbox"
+          :checked="settings.searchAllGroups"
+          @change="updateSetting('searchAllGroups', ($event.target as HTMLInputElement).checked)"
+        />
+      </label>
+
+      <label class="setting-row check-row">
+        <div>
+          <div class="label">Clear search after selecting a result</div>
+          <div class="desc">Reset the search bar after pressing Enter or clicking a search match.</div>
+        </div>
+        <input
+          type="checkbox"
+          :checked="settings.clearSearchOnSelect"
+          @change="updateSetting('clearSearchOnSelect', ($event.target as HTMLInputElement).checked)"
+        />
+      </label>
+
+      <label class="setting-row check-row">
+        <div>
+          <div class="label">Clear search when switching panels</div>
+          <div class="desc">Turn off to carry your search term across Tabs, Bookmarks, and History.</div>
+        </div>
+        <input
+          type="checkbox"
+          :checked="settings.clearSearchOnPanelSwitch"
+          @change="updateSetting('clearSearchOnPanelSwitch', ($event.target as HTMLInputElement).checked)"
+        />
+      </label>
+    </section>
+
+    <!-- Keyboard Shortcuts -->
     <section class="card">
       <div class="card-head">
         <div>
           <h2>Keyboard Shortcuts</h2>
           <p class="hint">
-            Default toggle shortcut is <code>Ctrl+E</code> (<code>Control+E</code> on macOS).
-            Customize any shortcut in the browser's native Extensions Shortcuts page.
+            Quick Search shortcuts always open Quick Search (Floating Popup or In-Page Spotlight
+            Overlay) rather than switching sidebar panels. Click a shortcut below and press any key
+            combo (or Backspace to clear), or use <strong>Change Global Shortcuts…</strong> to bind
+            browser-wide keys (works from any webpage, default toggle <code>Ctrl+E</code>).
           </p>
         </div>
-        <button class="btn-primary" @click="openShortcutsPage">Change Shortcuts…</button>
+        <button class="btn-primary" @click="openShortcutsPage">Change Global Shortcuts…</button>
       </div>
 
+      <div class="subhead">
+        <span>Quick Search Shortcuts (inside VBerry &amp; Spotlight)</span>
+        <button class="btn-link" @click="resetPanelShortcuts">Reset Defaults</button>
+      </div>
+      <div v-for="row in PANEL_SHORTCUT_ROWS" :key="row.key" class="setting-row">
+        <div class="label">{{ row.label }}</div>
+        <button
+          class="kbd-btn"
+          :class="{ recording: recordingShortcut === row.key }"
+          @click="recordingShortcut = row.key"
+          @blur="recordingShortcut === row.key && (recordingShortcut = null)"
+          @keydown="recordingShortcut === row.key && onRecordPanelShortcut(row.key, $event)"
+        >
+          {{
+            recordingShortcut === row.key
+              ? 'Press keys…'
+              : settings.panelShortcuts[row.key] || 'Not set'
+          }}
+        </button>
+      </div>
+
+      <div class="subhead">
+        <span>Global Browser Shortcuts</span>
+      </div>
       <div v-for="cmd in commands" :key="cmd.name" class="setting-row">
         <div class="label">
           {{ cmd.description || (cmd.name === '_execute_action' ? 'Open VBerry Side Panel' : cmd.name) }}
@@ -578,14 +812,127 @@ onMounted(() => {
   gap: 12px;
 }
 
-.kbd {
-  padding: 3px 8px;
+.kbd,
+.kbd-btn {
+  padding: 3px 10px;
   border: 1px solid var(--border);
   border-radius: 5px;
   background: var(--bg);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   white-space: nowrap;
+}
+
+.kbd-btn {
+  cursor: pointer;
+}
+
+.kbd-btn:hover {
+  border-color: var(--accent);
+}
+
+.kbd-btn.recording {
+  border-color: var(--accent);
+  background: var(--bg-active);
+  color: var(--text);
+}
+
+.subhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+  padding-bottom: 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.btn-link {
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.seg-toggle {
+  display: inline-flex;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.seg-btn {
+  border: none;
+  background: transparent;
+  color: var(--text);
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.seg-btn + .seg-btn {
+  border-left: 1px solid var(--border);
+}
+
+.seg-btn.active {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.mode-note {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.mode-note p {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.perm-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.perm-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 99px;
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.perm-badge.granted {
+  background: #14532d33;
+  border-color: #22c55e66;
+  color: #16a34a;
+}
+
+.perm-error {
+  color: #ef4444;
 }
 
 .hint {

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "VBerry",
-  "version": "6.3.0",
+  "version": "6.4.0",
   "description": "Chrome-native vertical tab trees, Tab Group panels, bookmarks, history, snapshots, and Sidebery import.",
   "incognito": "split",
   "icons": {
@@ -40,7 +40,17 @@
     "sessions",
     "favicon",
     "alarms",
-    "contextMenus"
+    "contextMenus",
+    "scripting"
+  ],
+  "optional_host_permissions": [
+    "<all_urls>"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["_favicon/*"],
+      "matches": ["<all_urls>"]
+    }
   ],
   "omnibox": {
     "keyword": "="
@@ -60,20 +70,14 @@
       },
       "description": "Open new tab in active group"
     },
-    "next_panel": {
-      "suggested_key": {
-        "default": "Alt+Period"
-      },
-      "description": "Switch to next panel"
-    },
-    "prev_panel": {
-      "suggested_key": {
-        "default": "Alt+Comma"
-      },
-      "description": "Switch to previous panel"
-    },
     "focus_search": {
-      "description": "Focus search in VBerry"
+      "description": "Quick Search Tabs"
+    },
+    "switch_to_bookmarks": {
+      "description": "Quick Search Bookmarks"
+    },
+    "switch_to_history": {
+      "description": "Quick Search History"
     },
     "create_snapshot": {
       "description": "Create tab snapshot"

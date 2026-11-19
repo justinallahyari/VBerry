@@ -1,5 +1,9 @@
 declare namespace chrome {
   namespace runtime {
+    interface MessageSender {
+      tab?: tabs.Tab
+      id?: string
+    }
     const id: string
     const lastError: { message?: string } | undefined
     function getURL(path: string): string
@@ -10,7 +14,7 @@ declare namespace chrome {
       addListener(
         cb: (
           message: any,
-          sender: { tab?: tabs.Tab; id?: string },
+          sender: MessageSender,
           sendResponse: (response?: any) => void
         ) => boolean | void
       ): void
@@ -166,13 +170,26 @@ declare namespace chrome {
       focused: boolean
       incognito: boolean
       type?: string
+      left?: number
+      top?: number
+      width?: number
+      height?: number
       tabs?: tabs.Tab[]
     }
     function getCurrent(getInfo?: { populate?: boolean }): Promise<Window>
     function get(windowId: number, getInfo?: { populate?: boolean }): Promise<Window>
     function getLastFocused(getInfo?: { populate?: boolean; windowTypes?: string[] }): Promise<Window>
     function getAll(getInfo?: { populate?: boolean; windowTypes?: string[] }): Promise<Window[]>
-    function create(createData?: { url?: string | string[]; focused?: boolean; incognito?: boolean }): Promise<Window>
+    function create(createData?: {
+      url?: string | string[]
+      type?: 'normal' | 'popup' | 'panel'
+      width?: number
+      height?: number
+      left?: number
+      top?: number
+      focused?: boolean
+      incognito?: boolean
+    }): Promise<Window>
     function update(windowId: number, updateInfo: { focused?: boolean }): Promise<Window>
     const onFocusChanged: {
       addListener(cb: (windowId: number) => void): void
@@ -215,6 +232,7 @@ declare namespace chrome {
       children?: BookmarkTreeNode[]
     }
     function getTree(): Promise<BookmarkTreeNode[]>
+    function getRecent(numberOfItems: number): Promise<BookmarkTreeNode[]>
     function search(query: string): Promise<BookmarkTreeNode[]>
     function create(bookmark: { parentId?: string; title?: string; url?: string; index?: number }): Promise<BookmarkTreeNode>
     function remove(id: string): Promise<void>
@@ -298,6 +316,24 @@ declare namespace chrome {
     const onInputEntered: {
       addListener(cb: (text: string, disposition: string) => void): void
     }
+  }
+
+  namespace permissions {
+    interface Permissions {
+      permissions?: string[]
+      origins?: string[]
+    }
+    function contains(permissions: Permissions): Promise<boolean>
+    function request(permissions: Permissions): Promise<boolean>
+    function remove(permissions: Permissions): Promise<boolean>
+  }
+
+  namespace scripting {
+    function executeScript<Args extends any[], Result = unknown>(injection: {
+      target: { tabId: number; allFrames?: boolean }
+      func: (...args: Args) => Result
+      args?: Args
+    }): Promise<Array<{ frameId: number; result?: Awaited<Result> }>>
   }
 }
 

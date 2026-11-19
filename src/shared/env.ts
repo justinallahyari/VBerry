@@ -128,12 +128,42 @@ export async function createNewTab(props: {
     active: props.active ?? true,
   }
   if (props.windowId !== undefined && props.windowId >= 0) createProps.windowId = props.windowId
-  if (props.index !== undefined) createProps.index = props.index
+
+  let targetIndex = props.index
+  if (targetIndex === undefined && !props.pinned && props.openerTabId === undefined) {
+    try {
+      const winTabs = await chrome.tabs.query(
+        props.windowId !== undefined && props.windowId >= 0
+          ? { windowId: props.windowId }
+          : { currentWindow: true }
+      )
+      if (winTabs.length > 0) {
+        targetIndex = winTabs.reduce(
+          (max, t) => Math.max(max, (typeof t.index === 'number' ? t.index : -1) + 1),
+          winTabs.length
+        )
+      }
+    } catch {
+      // Fall back to browser default index
+    }
+  }
+  if (targetIndex !== undefined) createProps.index = targetIndex
   if (resolvedUrl) createProps.url = resolvedUrl
   if (props.pinned !== undefined) createProps.pinned = props.pinned
   if (props.openerTabId !== undefined) createProps.openerTabId = props.openerTabId
 
   const tab = await chrome.tabs.create(createProps)
+
+  // Ensure Vivaldi/browsers with "New Tab Position: After Active Tab" still place VBerry tabs at the bottom
+  if (
+    targetIndex !== undefined &&
+    props.index === undefined &&
+    tab.id !== undefined &&
+    typeof tab.index === 'number' &&
+    tab.index < targetIndex
+  ) {
+    await chrome.tabs.move?.(tab.id, { index: -1 }).catch(() => {})
+  }
 
   // Runtime Vivaldi fallback: Chrome always opens `chrome://newtab/`, whereas Vivaldi
   // opens `about:blank` (or an empty URL) when `chrome.tabs.create` is called without a URL.

@@ -1,15 +1,28 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { nextTick, ref, watch } from 'vue'
 import type { TreeTabNode } from '@/shared/types'
 import { getChromeFaviconUrl } from '@/shared/storage'
 
 const props = defineProps<{
   nodes: TreeTabNode[]
   selectedIds: Set<number>
+  highlightedId?: number | null
   groupTitle: string
   groupColor?: string
   isSavedEmpty?: boolean
 }>()
+
+const containerRef = ref<HTMLElement | null>(null)
+
+watch(
+  () => props.highlightedId,
+  async id => {
+    if (id === null || id === undefined) return
+    await nextTick()
+    const el = containerRef.value?.querySelector(`[data-tab-id="${id}"]`) as HTMLElement | null
+    el?.scrollIntoView({ block: 'nearest' })
+  }
+)
 
 const emit = defineEmits<{
   activate: [tabId: number, e: MouseEvent]
@@ -72,7 +85,7 @@ function onAuxClick(e: MouseEvent, tabId: number) {
 </script>
 
 <template>
-  <div class="tab-tree" @contextmenu.self.prevent="emit('panelContextMenu', $event)">
+  <div ref="containerRef" class="tab-tree" @contextmenu.self.prevent="emit('panelContextMenu', $event)">
     <div v-if="isSavedEmpty && nodes.length === 0" class="empty-state">
       <div class="empty-title">{{ groupTitle }}</div>
       <p class="empty-sub">No open tabs in this group yet.</p>
@@ -89,10 +102,12 @@ function onAuxClick(e: MouseEvent, tabId: number) {
         v-for="node in nodes"
         v-show="!node.hidden"
         :key="node.id"
+        :data-tab-id="node.id"
         class="tab-row"
         :class="{
           active: node.tab.active,
           selected: selectedIds.has(node.id),
+          'search-focus': highlightedId === node.id,
           discarded: node.tab.discarded,
           'drop-before': dragOverId === node.id && dragPosition === 'before',
           'drop-into': dragOverId === node.id && dragPosition === 'into',
@@ -101,7 +116,7 @@ function onAuxClick(e: MouseEvent, tabId: number) {
         :style="{ paddingLeft: `${6 + node.level * 16}px` }"
         draggable="true"
         :title="`${node.tab.title || ''}\n${node.tab.url || ''}`"
-        @click="emit('activate', node.id, $event)"
+        @mousedown.left="emit('activate', node.id, $event)"
         @auxclick="onAuxClick($event, node.id)"
         @contextmenu.prevent="emit('contextMenu', node.tab, $event)"
         @dragstart="onDragStart($event, node.id)"
@@ -129,6 +144,7 @@ function onAuxClick(e: MouseEvent, tabId: number) {
             v-if="node.hasChildren"
             class="fold-btn"
             :title="node.folded ? 'Expand branch' : 'Fold branch'"
+            @mousedown.stop
             @click.stop="emit('toggleFold', node.id)"
           >
             <svg
@@ -159,12 +175,18 @@ function onAuxClick(e: MouseEvent, tabId: number) {
           v-if="node.tab.audible || node.tab.mutedInfo?.muted"
           class="icon-action"
           :title="node.tab.mutedInfo?.muted ? 'Unmute tab' : 'Mute tab'"
+          @mousedown.stop
           @click.stop="emit('toggleMute', node.tab)"
         >
           {{ node.tab.mutedInfo?.muted ? '🔇' : '🔊' }}
         </button>
 
-        <button class="close-btn" title="Close tab" @click.stop="emit('close', node.id)">
+        <button
+          class="close-btn"
+          title="Close tab"
+          @mousedown.stop
+          @click.stop="emit('close', node.id)"
+        >
           <svg viewBox="0 0 16 16" aria-hidden="true">
             <path
               d="M3 3l10 10M13 3 3 13"
@@ -225,6 +247,12 @@ function onAuxClick(e: MouseEvent, tabId: number) {
 .tab-row.active {
   background: var(--bg-active);
   font-weight: 500;
+}
+
+.tab-row.search-focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: var(--bg-selected);
 }
 
 .tab-row.discarded {

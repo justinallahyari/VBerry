@@ -1,18 +1,29 @@
-import type { RuntimeMessage } from '@/shared/types'
+import type {
+  RuntimeMessage,
+  Settings,
+  SpotlightGroup,
+  SpotlightItem,
+  SpotlightView,
+} from '@/shared/types'
 import {
+  getChromeFaviconUrl,
   loadSavedPanels,
   loadSettings,
   loadTreeMeta,
   loadVirtualGroupMap,
-  saveTreeMeta,
-  saveVirtualGroupMap,
+  remapReplacedTabIds,
   STORAGE_KEYS,
+  updateTreeMeta,
+  updateVirtualGroupMap,
 } from '@/shared/storage'
-import { getTargetWindowId } from '@/shared/env'
-import { matchesMoveRule, reparentOnRemove } from '@/shared/tree'
+import { createNewTab, getTargetWindowId } from '@/shared/env'
+import { rankSearchItems } from '@/shared/search'
+import { mountSpotlightOverlay, type SpotlightOverlayConfig } from '@/shared/spotlight-overlay'
+import { buildTabTree, matchesMoveRule, reparentOnRemove, toggleFold } from '@/shared/tree'
 import {
   assignTabsToVirtualGroup,
   captureSnapshot,
+  discardTabs,
   materializeSavedPanel,
   moveTabsToGroup,
   moveTabsToSavedPanel,
@@ -29,9 +40,10 @@ const AUTO_SNAPSHOT_ALARM = 'vberry_auto_snapshot'
 const MENU_ROOT_ID = 'vberry_send_to_group'
 const openSidePanelWindows = new Set<number>()
 let lastFocusedWindowId = -1
+let quickSearchWindowId = -1
 
 chrome.windows?.onFocusChanged?.addListener(winId => {
-  if (typeof winId === 'number' && winId >= 0) {
+  if (typeof winId === 'number' && winId >= 0 && winId !== quickSearchWindowId) {
     lastFocusedWindowId = winId
   }
 })
@@ -39,10 +51,13 @@ chrome.windows?.onFocusChanged?.addListener(winId => {
 chrome.windows?.onRemoved?.addListener(winId => {
   openSidePanelWindows.delete(winId)
   if (lastFocusedWindowId === winId) lastFocusedWindowId = -1
+  if (quickSearchWindowId === winId) quickSearchWindowId = -1
 })
 
 chrome.tabs.onActivated.addListener(info => {
-  if (info.windowId >= 0) lastFocusedWindowId = info.windowId
+  if (info.windowId >= 0 && info.windowId !== quickSearchWindowId) {
+    lastFocusedWindowId = info.windowId
+  }
 })
 
 function toggleSidePanelForWindow(winId: number): void {
@@ -99,6 +114,61 @@ chrome.runtime.onMessage.addListener((msg: RuntimeMessage, _sender, sendResponse
       .then(() => persistCurrentSession())
       .then(() => sendResponse({ ok: true }))
       .catch(() => sendResponse({ ok: false }))
+    return true
+  }
+  if (msg.type === 'vberry:discard-tabs') {
+    void chrome.tabs
+      .query({ windowId: msg.windowId })
+      .then(winTabs => discardTabs(msg.tabIds, winTabs, msg.windowId))
+      .then(() => persistCurrentSession())
+      .then(() => sendResponse({ ok: true }))
+      .catch(() => sendResponse({ ok: false }))
+    return true
+  }
+  if (msg.type === 'vberry:open-quick-search') {
+    void launchQuickSearch(msg.windowId, msg.view)
+      .then(() => sendResponse({ ok: true }))
+      .catch(() => sendResponse({ ok: false }))
+    return true
+  }
+  if (msg.type === 'vberry:spotlight-toggle-fold') {
+    void updateTreeMeta(meta => toggleFold(msg.tabId, meta))
+      .then(() => persistCurrentSession())
+      .then(() => sendResponse({ ok: true }))
+      .catch(() => sendResponse({ ok: false }))
+    return true
+  }
+  if (msg.type === 'vberry:spotlight-query') {
+    void querySpotlightItems(
+      msg.query,
+      msg.view,
+      msg.windowId,
+      msg.groupKey,
+      msg.expandedFolderIds
+    )
+      .then(result => sendResponse(result))
+      .catch(() => sendResponse({ items: [], groups: [] }))
+    return true
+  }
+  if (msg.type === 'vberry:spotlight-activate') {
+    void (async () => {
+      if (msg.kind === 'tab' && msg.tabId !== undefined) {
+        await chrome.tabs.update(msg.tabId, { active: true }).catch(() => {})
+        if (msg.windowId >= 0) {
+          await chrome.windows.update(msg.windowId, { focused: true }).catch(() => {})
+        }
+      } else if (msg.kind === 'url' && msg.url) {
+        await createNewTab({
+          windowId: msg.windowId >= 0 ? msg.windowId : undefined,
+          url: msg.url,
+          active: true,
+        }).catch(() => {})
+        if (msg.windowId >= 0) {
+          await chrome.windows.update(msg.windowId, { focused: true }).catch(() => {})
+        }
+      }
+      sendResponse({ ok: true })
+    })()
     return true
   }
 })
@@ -293,10 +363,13 @@ chrome.tabs.onCreated.addListener(async tab => {
       }
     }
 
-    if (settings.autoNestChildTabs) {
-      const meta = await loadTreeMeta()
-      meta[tab.id] = { ...meta[tab.id], parentId: opener.id }
-      await saveTreeMeta(meta)
+    if (settings.autoNestChildTabs && tab.id !== undefined) {
+      const childId = tab.id
+      const parentId = opener.id
+      await updateTreeMeta(meta => {
+        meta[childId] = { ...meta[childId], parentId }
+        return meta
+      })
     }
   } catch {
     // Opener may have closed before onCreated finished
@@ -304,14 +377,18 @@ chrome.tabs.onCreated.addListener(async tab => {
 })
 
 chrome.tabs.onRemoved.addListener(async tabId => {
-  const [meta, vmap] = await Promise.all([loadTreeMeta(), loadVirtualGroupMap()])
-  if (meta[tabId] || Object.values(meta).some(e => e.parentId === tabId)) {
-    await saveTreeMeta(reparentOnRemove(tabId, meta))
-  }
-  if (vmap[tabId]) {
-    delete vmap[tabId]
-    await saveVirtualGroupMap(vmap)
-  }
+  await Promise.all([
+    updateTreeMeta(meta =>
+      meta[tabId] || Object.values(meta).some(e => e.parentId === tabId)
+        ? reparentOnRemove(tabId, meta)
+        : null
+    ),
+    updateVirtualGroupMap(vmap => {
+      if (!vmap[tabId]) return null
+      delete vmap[tabId]
+      return vmap
+    }),
+  ])
   schedulePersistSession()
 })
 
@@ -320,24 +397,8 @@ chrome.tabs.onMoved.addListener(() => {
 })
 
 chrome.tabs.onReplaced.addListener(async (addedTabId, removedTabId) => {
-  const [meta, vmap] = await Promise.all([loadTreeMeta(), loadVirtualGroupMap()])
-  const hasMetaEntry = Boolean(meta[removedTabId])
-  const hasChildren = Object.values(meta).some(e => e.parentId === removedTabId)
-  if (hasMetaEntry || hasChildren) {
-    if (hasMetaEntry) {
-      meta[addedTabId] = meta[removedTabId]
-      delete meta[removedTabId]
-    }
-    for (const entry of Object.values(meta)) {
-      if (entry.parentId === removedTabId) entry.parentId = addedTabId
-    }
-    await saveTreeMeta(meta)
-  }
-  if (vmap[removedTabId]) {
-    vmap[addedTabId] = vmap[removedTabId]
-    delete vmap[removedTabId]
-    await saveVirtualGroupMap(vmap)
-  }
+  await remapReplacedTabIds(new Map([[removedTabId, addedTabId]]))
+  schedulePersistSession()
 })
 
 // Apply URL moveRules from SavedPanels (including imported Sidebery moveRules)
@@ -360,28 +421,438 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   await moveTabsToSavedPanel(tab.windowId, [tabId], matched).catch(() => {})
 })
 
-// Keyboard commands
-chrome.commands.onCommand.addListener(async (command, tab) => {
-  if (command === 'create_snapshot') {
-    await captureSnapshot()
-    return
+const QUICK_SEARCH_COMMANDS: Record<string, SpotlightView> = {
+  focus_search: 'tabs',
+  switch_to_bookmarks: 'bookmarks',
+  switch_to_history: 'history',
+}
+
+function commandForSpotlightView(view: SpotlightView): string {
+  if (view === 'bookmarks') return 'switch_to_bookmarks'
+  if (view === 'history') return 'switch_to_history'
+  return 'focus_search'
+}
+
+function flattenBookmarkTree(
+  nodes: chrome.bookmarks.BookmarkTreeNode[],
+  expanded: Set<string>,
+  level = 0
+): SpotlightItem[] {
+  const out: SpotlightItem[] = []
+  for (const n of nodes) {
+    if (n.id === '0') {
+      if (n.children) out.push(...flattenBookmarkTree(n.children, expanded, 0))
+      continue
+    }
+    const isFolder = !n.url
+    if (isFolder) {
+      const isExpanded = expanded.has(n.id)
+      out.push({
+        id: `bmf:${n.id}`,
+        kind: 'folder',
+        folderId: n.id,
+        title: n.title || 'Folder',
+        url: '',
+        level,
+        expanded: isExpanded,
+      })
+      if (isExpanded && n.children) {
+        out.push(...flattenBookmarkTree(n.children, expanded, level + 1))
+      }
+    } else {
+      out.push({
+        id: `bm:${n.id}`,
+        kind: 'url',
+        title: n.title || n.url || '',
+        url: n.url || '',
+        favIconUrl: getChromeFaviconUrl(n.url, 32),
+        level,
+      })
+    }
+  }
+  return out
+}
+
+function isInjectableUrl(url?: string): boolean {
+  if (!url) return false
+  if (!/^https?:\/\//i.test(url)) return false
+  if (
+    url.startsWith('https://chromewebstore.google.com/') ||
+    url.startsWith('https://chrome.google.com/webstore')
+  ) {
+    return false
+  }
+  return true
+}
+
+async function querySpotlightItems(
+  query: string,
+  view: SpotlightView,
+  windowId: number,
+  groupKey?: string,
+  expandedFolderIds?: string[]
+): Promise<{ items: SpotlightItem[]; groups: SpotlightGroup[]; activeGroupKey: string }> {
+  const q = query.trim()
+
+  const [winTabs, winGroups, savedPanels, vmap, treeMeta, settings] = await Promise.all([
+    chrome.tabs.query(windowId >= 0 ? { windowId } : { currentWindow: true }),
+    safeQueryTabGroups(windowId >= 0 ? { windowId } : {}),
+    getSavedPanelsCached(),
+    loadVirtualGroupMap(),
+    loadTreeMeta(),
+    loadSettings(),
+  ])
+
+  const validSavedIds = new Set(savedPanels.map(p => p.id))
+  const ungroupedTabs: chrome.tabs.Tab[] = []
+  const byGroupId = new Map<number, chrome.tabs.Tab[]>()
+  const bySavedId = new Map<string, chrome.tabs.Tab[]>()
+
+  for (const t of [...winTabs].sort((a, b) => a.index - b.index)) {
+    if (t.pinned || t.id === undefined) continue
+    if (t.groupId !== UNGROUPED_ID) {
+      const list = byGroupId.get(t.groupId)
+      if (list) list.push(t)
+      else byGroupId.set(t.groupId, [t])
+    } else if (vmap[t.id] && validSavedIds.has(vmap[t.id])) {
+      const sid = vmap[t.id]
+      const list = bySavedId.get(sid)
+      if (list) list.push(t)
+      else bySavedId.set(sid, [t])
+    } else {
+      ungroupedTabs.push(t)
+    }
   }
 
-  if (command === 'discard_inactive_tabs') {
-    const windowId = tab?.windowId ?? (await getTargetWindowId())
-    const tabs = await chrome.tabs.query(windowId >= 0 ? { windowId } : { currentWindow: true })
-    await Promise.allSettled(
-      tabs
-        .filter(t => t.id !== undefined && !t.active && !t.pinned && !t.audible && !t.discarded)
-        .map(t => chrome.tabs.discard(t.id!))
+  const liveTitles = new Set(winGroups.map(g => (g.title ?? '').trim().toLowerCase()))
+  const unmaterializedSaved = savedPanels.filter(
+    p => !liveTitles.has(p.title.trim().toLowerCase())
+  )
+
+  const groups: SpotlightGroup[] = [
+    { key: 'ungrouped', title: 'Tabs', count: ungroupedTabs.length },
+    ...winGroups.map(g => ({
+      key: `group:${g.id}`,
+      title: g.title?.trim() || 'Group',
+      color: g.color,
+      count: byGroupId.get(g.id)?.length ?? 0,
+    })),
+    ...unmaterializedSaved.map(p => ({
+      key: `saved:${p.id}`,
+      title: p.title,
+      color: p.color,
+      count: bySavedId.get(p.id)?.length ?? 0,
+    })),
+  ]
+
+  let resolvedGroupKey = groupKey || 'ungrouped'
+  if (!groupKey) {
+    const activeTab = winTabs.find(t => t.active && !t.pinned)
+    if (activeTab) {
+      if (activeTab.groupId !== UNGROUPED_ID && byGroupId.has(activeTab.groupId)) {
+        resolvedGroupKey = `group:${activeTab.groupId}`
+      } else if (activeTab.id !== undefined && vmap[activeTab.id] && validSavedIds.has(vmap[activeTab.id])) {
+        resolvedGroupKey = `saved:${vmap[activeTab.id]}`
+      }
+    }
+  }
+
+  if (view === 'bookmarks') {
+    if (q) {
+      const found = (await chrome.bookmarks.search(q).catch(() => [])).filter(b => !!b.url)
+      const ranked = rankSearchItems(found, q, b => ({
+        title: b.title,
+        url: b.url,
+        tieBreaker: b.dateAdded ?? 0,
+      }))
+      return {
+        groups,
+        activeGroupKey: resolvedGroupKey,
+        items: ranked.slice(0, 40).map(b => ({
+          id: `bm:${b.id}`,
+          kind: 'url',
+          title: b.title || b.url || '',
+          url: b.url || '',
+          favIconUrl: getChromeFaviconUrl(b.url, 32),
+        })),
+      }
+    }
+    const tree = await chrome.bookmarks.getTree().catch(() => [])
+    const expanded = new Set<string>(expandedFolderIds ?? ['1', '2'])
+    return {
+      groups,
+      activeGroupKey: resolvedGroupKey,
+      items: flattenBookmarkTree(tree, expanded),
+    }
+  }
+
+  if (view === 'history') {
+    const found = (
+      await chrome.history
+        .search({ text: q, maxResults: q ? 60 : 40, startTime: 0 })
+        .catch(() => [])
+    ).filter(h => !!h.url)
+    const list = q
+      ? rankSearchItems(found, q, h => ({
+          title: h.title,
+          url: h.url,
+          tieBreaker: h.lastVisitTime ?? 0,
+        }))
+      : found
+    return {
+      groups,
+      activeGroupKey: resolvedGroupKey,
+      items: list.slice(0, 40).map(h => ({
+        id: `hist:${h.id}`,
+        kind: 'url',
+        title: h.title || h.url || '',
+        url: h.url || '',
+        favIconUrl: getChromeFaviconUrl(h.url, 32),
+      })),
+    }
+  }
+
+  // Tabs
+  const groupMap = new Map(winGroups.map(g => [g.id, g]))
+  const savedMap = new Map(savedPanels.map(p => [p.id, p]))
+  let panelList = ungroupedTabs
+  if (resolvedGroupKey.startsWith('group:')) {
+    const gid = Number(resolvedGroupKey.slice(6))
+    panelList = byGroupId.get(gid) ?? []
+  } else if (resolvedGroupKey.startsWith('saved:')) {
+    const sid = resolvedGroupKey.slice(6)
+    panelList = bySavedId.get(sid) ?? []
+  }
+
+  if (q) {
+    const ranked = rankSearchItems(
+      settings.searchAllGroups ? winTabs.filter(t => !t.pinned && t.id !== undefined) : panelList,
+      q,
+      t => ({
+        title: t.title,
+        url: t.url || t.pendingUrl,
+        tieBreaker: (t.active ? 1e12 : 0) + (t.lastAccessed ?? 0),
+      })
     )
-    return
+    return {
+      groups,
+      activeGroupKey: resolvedGroupKey,
+      items: ranked.map(t => {
+        const grp = t.groupId !== UNGROUPED_ID ? groupMap.get(t.groupId) : undefined
+        const saved =
+          !grp && t.id !== undefined && vmap[t.id] ? savedMap.get(vmap[t.id]) : undefined
+        return {
+          id: `tab:${t.id}`,
+          kind: 'tab',
+          tabId: t.id,
+          title: t.title || t.url || '(Untitled)',
+          url: t.url || t.pendingUrl || '',
+          favIconUrl: getChromeFaviconUrl(t.url || t.pendingUrl, 32) || t.favIconUrl,
+          active: t.active,
+          discarded: t.discarded,
+          groupTitle: grp?.title?.trim() || saved?.title || undefined,
+          groupColor: grp?.color || saved?.color,
+        }
+      }),
+    }
   }
 
-  const targetWinId = lastFocusedWindowId >= 0 ? lastFocusedWindowId : tab?.windowId
-  chrome.runtime
-    .sendMessage({ type: 'vberry:command', command, windowId: targetWinId })
-    .catch(() => {})
+  const treeNodes = buildTabTree(panelList, treeMeta).filter(n => !n.hidden)
+  return {
+    groups,
+    activeGroupKey: resolvedGroupKey,
+    items: treeNodes.map(n => {
+      const t = n.tab
+      const grp = t.groupId !== UNGROUPED_ID ? groupMap.get(t.groupId) : undefined
+      const saved = !grp && t.id !== undefined && vmap[t.id] ? savedMap.get(vmap[t.id]) : undefined
+      return {
+        id: `tab:${t.id}`,
+        kind: 'tab',
+        tabId: t.id,
+        title: t.title || t.url || '(Untitled)',
+        url: t.url || t.pendingUrl || '',
+        favIconUrl: getChromeFaviconUrl(t.url || t.pendingUrl, 32) || t.favIconUrl,
+        active: t.active,
+        discarded: t.discarded,
+        level: n.level,
+        hasChildren: n.hasChildren,
+        childCount: n.childCount,
+        folded: n.folded,
+        groupTitle: grp?.title?.trim() || saved?.title || undefined,
+        groupColor: grp?.color || saved?.color,
+      }
+    }),
+  }
+}
+
+async function openQuickSearchPopup(
+  targetWinId: number,
+  view: SpotlightView,
+  command: string
+): Promise<void> {
+  if (quickSearchWindowId >= 0) {
+    try {
+      await chrome.windows.update(quickSearchWindowId, { focused: true })
+      chrome.runtime
+        .sendMessage({ type: 'vberry:command', command, windowId: targetWinId })
+        .catch(() => {})
+      return
+    } catch {
+      quickSearchWindowId = -1
+    }
+  }
+
+  const width = 520
+  const height = 540
+  let left: number | undefined
+  let top: number | undefined
+  try {
+    if (targetWinId >= 0) {
+      const win = await chrome.windows.get(targetWinId)
+      if (
+        win.left !== undefined &&
+        win.top !== undefined &&
+        win.width !== undefined &&
+        win.height !== undefined
+      ) {
+        left = Math.round(win.left + Math.max(0, (win.width - width) / 2))
+        top = Math.round(win.top + Math.max(40, (win.height - height) / 4))
+      }
+    }
+  } catch {
+    // Use OS default placement
+  }
+
+  const params = new URLSearchParams({
+    quicksearch: '1',
+    view,
+  })
+  if (targetWinId >= 0) params.set('win', String(targetWinId))
+  const url = chrome.runtime.getURL(`sidepanel.html?${params.toString()}`)
+
+  const created = await chrome.windows
+    .create({
+      url,
+      type: 'popup',
+      width,
+      height,
+      left,
+      top,
+      focused: true,
+    })
+    .catch(() => null)
+  if (created?.id !== undefined) {
+    quickSearchWindowId = created.id
+  }
+}
+
+async function tryOpenSpotlightOverlay(
+  targetWinId: number,
+  view: SpotlightView,
+  settings: Settings
+): Promise<boolean> {
+  try {
+    const granted = await chrome.permissions.contains({ origins: ['<all_urls>'] })
+    if (!granted || !chrome.scripting?.executeScript) return false
+
+    const tabs = await chrome.tabs.query(
+      targetWinId >= 0 ? { windowId: targetWinId, active: true } : { currentWindow: true, active: true }
+    )
+    const activeTab = tabs[0]
+    if (!activeTab?.id || !isInjectableUrl(activeTab.url)) return false
+
+    const winId = activeTab.windowId ?? targetWinId
+    if (winId >= 0) {
+      await chrome.windows.update(winId, { focused: true }).catch(() => {})
+    }
+    await chrome.tabs.update(activeTab.id, { active: true }).catch(() => {})
+
+    const config: SpotlightOverlayConfig = {
+      windowId: winId,
+      view,
+      theme: settings.theme,
+      density: settings.density,
+      fontSize: settings.fontSize,
+      iconSize: settings.iconSize,
+      uiIconSize: settings.uiIconSize,
+      tabControlIconSize: settings.tabControlIconSize,
+      showTabCounts: settings.showTabCounts,
+      showBookmarksPanel: settings.showBookmarksPanel,
+      showHistoryPanel: settings.showHistoryPanel,
+      autoHighlight: settings.autoHighlightSearchMatch,
+      clearOnPanelSwitch: settings.clearSearchOnPanelSwitch,
+      panelShortcuts: settings.panelShortcuts,
+      requireFocus: true,
+    }
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: activeTab.id },
+      func: mountSpotlightOverlay,
+      args: [config],
+    })
+    return results?.[0]?.result === true
+  } catch {
+    return false
+  }
+}
+
+async function launchQuickSearch(targetWinId: number, view: SpotlightView): Promise<void> {
+  const command = commandForSpotlightView(view)
+  // If the Floating Quick Search popup is already open, reuse and refocus it cleanly
+  if (quickSearchWindowId >= 0) {
+    try {
+      await chrome.windows.update(quickSearchWindowId, { focused: true })
+      chrome.runtime
+        .sendMessage({ type: 'vberry:command', command, windowId: targetWinId })
+        .catch(() => {})
+      return
+    } catch {
+      quickSearchWindowId = -1
+    }
+  }
+
+  const settings = await loadSettings()
+  if (settings.webpageSearchMode === 'overlay') {
+    const injected = await tryOpenSpotlightOverlay(targetWinId, view, settings)
+    if (injected) return
+  }
+  await openQuickSearchPopup(targetWinId, view, command)
+}
+
+// Keyboard commands
+chrome.commands.onCommand.addListener((command, tab) => {
+  const tabWinId =
+    tab?.windowId !== undefined && tab.windowId !== quickSearchWindowId ? tab.windowId : undefined
+  const syncWinId = lastFocusedWindowId >= 0 ? lastFocusedWindowId : tabWinId
+
+  void (async () => {
+    const targetWinId = syncWinId ?? (await getTargetWindowId())
+
+    if (command === 'create_snapshot') {
+      await captureSnapshot()
+      return
+    }
+
+    if (command === 'discard_inactive_tabs') {
+      const tabs = await chrome.tabs.query(
+        targetWinId >= 0 ? { windowId: targetWinId } : { currentWindow: true }
+      )
+      const inactiveIds = tabs
+        .filter(t => t.id !== undefined && !t.active && !t.pinned && !t.audible && !t.discarded)
+        .map(t => t.id!)
+      await discardTabs(inactiveIds, tabs, targetWinId)
+      return
+    }
+
+    const searchView = QUICK_SEARCH_COMMANDS[command]
+    if (searchView) {
+      await launchQuickSearch(targetWinId, searchView)
+      return
+    }
+
+    chrome.runtime
+      .sendMessage({ type: 'vberry:command', command, windowId: targetWinId })
+      .catch(() => {})
+  })()
 })
 
 function escapeXml(str: string): string {
@@ -455,7 +926,8 @@ chrome.omnibox.onInputEntered.addListener(async text => {
 
   const url = text.startsWith('url:') ? text.slice(4) : text
   if (/^https?:\/\//i.test(url)) {
-    await chrome.tabs.create({ url, active: true })
+    const winId = await getTargetWindowId()
+    await createNewTab({ windowId: winId >= 0 ? winId : undefined, url, active: true })
   } else {
     const panels = await loadSavedPanels()
     const match = panels.find(p => p.title.toLowerCase() === text.trim().toLowerCase())

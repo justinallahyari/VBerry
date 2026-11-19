@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { captureSnapshot, restoreSnapshot, restoreSnapshotGroup } from './groups'
+import { captureSnapshot, discardTabs, restoreSnapshot, restoreSnapshotGroup } from './groups'
 import { resetVivaldiDetectionCache } from './env'
-import { STORAGE_KEYS } from './storage'
+import { remapReplacedTabIds, STORAGE_KEYS } from './storage'
 import type { SavedPanel, TabTreeMap } from './types'
 
 function makeTab(
@@ -240,5 +240,50 @@ describe('Snapshot Tab Tree Save & Restore', () => {
     expect(restoredTree[win2Tabs[0].id!]).toEqual({ folded: true })
     expect(restoredTree[win2Tabs[1].id!]?.parentId).toBe(win2Tabs[0].id)
     expect(restoredTree[win2Tabs[2].id!]?.parentId).toBe(win2Tabs[1].id)
+  })
+
+  it('preserves multi-level tab trees and virtual groups during bulk Unload Inactive Tabs when Chrome replaces tab IDs', async () => {
+    installMock([{ id: 1, focused: true, incognito: false, tabs: [] }])
+    // Simulate Chrome replacing every discarded tab's ID (id -> id + 1000) AND firing
+    // concurrent onReplaced-style remapReplacedTabIds calls simultaneously!
+    const concurrentRemaps: Promise<void>[] = []
+    ;(globalThis as any).chrome.tabs.discard = vi.fn(async (oldId: number) => {
+      const newId = oldId + 1000
+      concurrentRemaps.push(remapReplacedTabIds(new Map([[oldId, newId]])))
+      return { id: newId, discarded: true }
+    })
+
+    const windowTabs = [
+      makeTab(1, 0, 'https://active.example.com', { active: true }),
+      makeTab(2, 1, 'https://parent.example.com'),
+      makeTab(3, 2, 'https://child.example.com'),
+      makeTab(4, 3, 'https://grandchild.example.com'),
+    ]
+    // Unfolded root parent (2) has no entry of its own; child (3) -> 2, grandchild (4) -> 3
+    sessionStore[STORAGE_KEYS.treeMeta] = {
+      3: { parentId: 2 },
+      4: { parentId: 3, folded: true },
+    }
+    sessionStore[STORAGE_KEYS.virtualGroups] = {
+      2: 'panel_work',
+      3: 'panel_work',
+      4: 'panel_work',
+    }
+
+    await discardTabs([2, 3, 4], windowTabs, 1)
+    await Promise.all(concurrentRemaps)
+
+    const finalTree = sessionStore[STORAGE_KEYS.treeMeta] as TabTreeMap
+    expect(finalTree[1003]).toEqual({ parentId: 1002 })
+    expect(finalTree[1004]).toEqual({ parentId: 1003, folded: true })
+    expect(finalTree[3]).toBeUndefined()
+    expect(finalTree[4]).toBeUndefined()
+
+    const finalVmap = sessionStore[STORAGE_KEYS.virtualGroups] as Record<number, string>
+    expect(finalVmap).toEqual({
+      1002: 'panel_work',
+      1003: 'panel_work',
+      1004: 'panel_work',
+    })
   })
 })

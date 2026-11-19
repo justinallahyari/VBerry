@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { nextTick, onMounted, ref, watch } from 'vue'
 import { getChromeFaviconUrl } from '@/shared/storage'
+import { rankSearchItems } from '@/shared/search'
 
 const props = defineProps<{
   query: string
+  activeIndex?: number
 }>()
 
 const emit = defineEmits<{
@@ -12,19 +14,50 @@ const emit = defineEmits<{
   sessionContextMenu: [session: chrome.sessions.Session, e: MouseEvent]
 }>()
 
-defineExpose({ reload: load })
-
+const containerRef = ref<HTMLElement | null>(null)
 const recentlyClosed = ref<chrome.sessions.Session[]>([])
 const historyItems = ref<chrome.history.HistoryItem[]>([])
 
 async function load() {
+  const q = props.query.trim()
   const [sessions, hist] = await Promise.all([
     chrome.sessions.getRecentlyClosed({ maxResults: 10 }).catch(() => []),
-    chrome.history.search({ text: props.query.trim(), maxResults: 80 }),
+    chrome.history.search({ text: q, maxResults: 80 }),
   ])
   recentlyClosed.value = sessions
-  historyItems.value = hist
+  historyItems.value = q
+    ? rankSearchItems(hist, q, h => ({
+        title: h.title,
+        url: h.url,
+        tieBreaker: (h.visitCount ?? 0) * 1000 + (h.lastVisitTime ?? 0) / 1e9,
+      }))
+    : hist
 }
+
+function getResultCount(): number {
+  return historyItems.value.length
+}
+
+function activateIndex(index: number): boolean {
+  const item = historyItems.value[index]
+  if (item?.url) {
+    emit('openUrl', item.url, false)
+    return true
+  }
+  return false
+}
+
+defineExpose({ reload: load, getResultCount, activateIndex })
+
+watch(
+  () => props.activeIndex,
+  async idx => {
+    if (idx === undefined || idx < 0) return
+    await nextTick()
+    const el = containerRef.value?.querySelector(`[data-row-idx="${idx}"]`) as HTMLElement | null
+    el?.scrollIntoView({ block: 'nearest' })
+  }
+)
 
 async function restoreSession(sessionId?: string) {
   if (!sessionId) return
@@ -42,7 +75,7 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="list-view">
+  <div ref="containerRef" class="list-view">
     <template v-if="!query.trim() && recentlyClosed.length">
       <div class="section-label">Recently Closed</div>
       <div
@@ -68,9 +101,11 @@ onMounted(load)
     <div class="section-label">History</div>
     <div v-if="historyItems.length === 0" class="empty">No history entries found.</div>
     <div
-      v-for="item in historyItems"
+      v-for="(item, idx) in historyItems"
       :key="item.id"
+      :data-row-idx="idx"
       class="row"
+      :class="{ 'search-focus': activeIndex === idx }"
       :title="item.url"
       @click="item.url && emit('openUrl', item.url, false)"
       @auxclick.middle.prevent="item.url && emit('openUrl', item.url, true)"
@@ -112,6 +147,12 @@ onMounted(load)
 
 .row:hover {
   background: var(--bg-hover);
+}
+
+.row.search-focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: var(--bg-selected);
 }
 
 .fav {

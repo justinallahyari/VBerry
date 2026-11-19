@@ -26,7 +26,7 @@ describe('Vivaldi detection & Tab Groups fallback', () => {
     const liveGroups: any[] = []
     const createMock = vi.fn(async (props: any) => ({
       id: 42,
-      index: 0,
+      index: props.index ?? 0,
       windowId: props.windowId ?? 1,
       active: true,
       pinned: false,
@@ -35,6 +35,7 @@ describe('Vivaldi detection & Tab Groups fallback', () => {
       groupId: -1,
       url: props.url ?? 'chrome://newtab/',
     }))
+    const moveMock = vi.fn(async () => ({}))
 
     const groupMock = opts.groupThrows
       ? vi.fn(async () => {
@@ -56,6 +57,7 @@ describe('Vivaldi detection & Tab Groups fallback', () => {
             : [{ id: 1, url: 'https://example.com' }]
         ),
         create: createMock,
+        move: moveMock,
         group: groupMock,
       },
       tabGroups: {
@@ -74,30 +76,50 @@ describe('Vivaldi detection & Tab Groups fallback', () => {
       },
     }
 
-    return { createMock, groupMock, groupUpdateMock }
+    return { createMock, moveMock, groupMock, groupUpdateMock }
   }
 
-  it('detects Vivaldi via vivExtData and opens chrome://vivaldi-webui/startpage', async () => {
+  it('detects Vivaldi via vivExtData and opens chrome://vivaldi-webui/startpage at bottom of tab stack', async () => {
     const { createMock } = installChromeMock({ vivaldiTab: true })
     expect(await isVivaldi()).toBe(true)
 
     await createNewTab({ windowId: 1 })
     expect(createMock).toHaveBeenCalledWith({
       windowId: 1,
+      index: 1,
       active: true,
       url: VIVALDI_STARTPAGE_URL,
     })
   })
 
-  it('omits url on standard Chrome so native New Tab Page opens', async () => {
+  it('omits url on standard Chrome so native New Tab Page opens at bottom of tab stack', async () => {
     const { createMock } = installChromeMock({ vivaldiTab: false })
     expect(await isVivaldi()).toBe(false)
 
     await createNewTab({ windowId: 1 })
     expect(createMock).toHaveBeenCalledWith({
       windowId: 1,
+      index: 1,
       active: true,
     })
+  })
+
+  it('moves tab to bottom (-1) if browser ignores create index (e.g. Vivaldi After Active Tab)', async () => {
+    const { moveMock } = installChromeMock({ vivaldiTab: true })
+    ;(globalThis as any).chrome.tabs.query = vi.fn(async () => [
+      { id: 1, index: 0, url: 'https://a.com', vivExtData: '{}' },
+      { id: 2, index: 1, url: 'https://b.com', vivExtData: '{}' },
+      { id: 3, index: 2, url: 'https://c.com', vivExtData: '{}' },
+    ])
+    ;(globalThis as any).chrome.tabs.create = vi.fn(async (props: any) => ({
+      id: 99,
+      index: 1, // Browser inserted right after active tab instead of at index 3
+      windowId: props.windowId ?? 1,
+      url: props.url,
+    }))
+
+    await createNewTab({ windowId: 1, url: 'https://bookmark.example.com' })
+    expect(moveMock).toHaveBeenCalledWith(99, { index: -1 })
   })
 
   it('uses native chrome.tabGroups on Chrome', async () => {
@@ -165,7 +187,7 @@ describe('Vivaldi detection & Tab Groups fallback', () => {
     ]
     await discardTabs([2], onlyUnloadedOthers, 1)
     expect(updateMock).not.toHaveBeenCalled()
-    expect(createMock).toHaveBeenCalledWith({ windowId: 1, active: true })
+    expect(createMock).toHaveBeenCalledWith({ windowId: 1, index: 1, active: true })
     expect(discardMock).toHaveBeenCalledWith(2)
   })
 

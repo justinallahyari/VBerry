@@ -1,15 +1,19 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { getChromeFaviconUrl } from '@/shared/storage'
+import { rankSearchItems } from '@/shared/search'
 
 const props = defineProps<{
   query: string
+  activeIndex?: number
 }>()
 
 const emit = defineEmits<{
   openUrl: [url: string, background: boolean]
   contextMenu: [node: chrome.bookmarks.BookmarkTreeNode, e: MouseEvent]
 }>()
+
+const containerRef = ref<HTMLElement | null>(null)
 
 interface FlatBookmark {
   node: chrome.bookmarks.BookmarkTreeNode
@@ -60,6 +64,44 @@ async function deleteBookmark(node: chrome.bookmarks.BookmarkTreeNode) {
   }
 }
 
+function getResultCount(): number {
+  return props.query.trim() ? searchResults.value.length : flatBookmarks.value.length
+}
+
+function activateIndex(index: number): boolean {
+  if (props.query.trim()) {
+    const item = searchResults.value[index]
+    if (item?.url) {
+      emit('openUrl', item.url, false)
+      return true
+    }
+    return false
+  }
+  const flat = flatBookmarks.value[index]
+  if (!flat) return false
+  if (flat.isFolder) {
+    toggleFolder(flat.node.id)
+    return true
+  }
+  if (flat.node.url) {
+    emit('openUrl', flat.node.url, false)
+    return true
+  }
+  return false
+}
+
+defineExpose({ getResultCount, activateIndex })
+
+watch(
+  () => props.activeIndex,
+  async idx => {
+    if (idx === undefined || idx < 0) return
+    await nextTick()
+    const el = containerRef.value?.querySelector(`[data-row-idx="${idx}"]`) as HTMLElement | null
+    el?.scrollIntoView({ block: 'nearest' })
+  }
+)
+
 watch(
   () => props.query,
   async q => {
@@ -69,7 +111,12 @@ watch(
       return
     }
     const hits = await chrome.bookmarks.search(trimmed)
-    searchResults.value = hits.filter(h => Boolean(h.url))
+    const links = hits.filter(h => Boolean(h.url))
+    searchResults.value = rankSearchItems(links, trimmed, h => ({
+      title: h.title,
+      url: h.url,
+      tieBreaker: h.dateAdded ?? 0,
+    }))
   },
   { immediate: true }
 )
@@ -91,13 +138,15 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="list-view">
+  <div ref="containerRef" class="list-view">
     <template v-if="query.trim()">
       <div v-if="searchResults.length === 0" class="empty">No matching bookmarks.</div>
       <div
-        v-for="item in searchResults"
+        v-for="(item, idx) in searchResults"
         :key="item.id"
+        :data-row-idx="idx"
         class="row"
+        :class="{ 'search-focus': activeIndex === idx }"
         :title="item.url"
         @click="item.url && emit('openUrl', item.url, false)"
         @auxclick.middle.prevent="item.url && emit('openUrl', item.url, true)"
@@ -110,9 +159,11 @@ onUnmounted(() => {
 
     <template v-else>
       <div
-        v-for="item in flatBookmarks"
+        v-for="(item, idx) in flatBookmarks"
         :key="item.node.id"
+        :data-row-idx="idx"
         class="row"
+        :class="{ 'search-focus': activeIndex === idx }"
         :style="{ paddingLeft: `${8 + item.level * 14}px` }"
         :title="item.node.url || item.node.title"
         @click="item.isFolder ? toggleFolder(item.node.id) : item.node.url && emit('openUrl', item.node.url, false)"
@@ -158,6 +209,12 @@ onUnmounted(() => {
 
 .row:hover {
   background: var(--bg-hover);
+}
+
+.row.search-focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: var(--bg-selected);
 }
 
 .folder-icon {
