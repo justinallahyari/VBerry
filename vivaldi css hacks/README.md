@@ -6,7 +6,7 @@ This folder contains a Vivaldi Custom UI CSS modification that hides Vivaldi's p
 
 1. Open `vivaldi://experiments` in Vivaldi's address bar and enable **Allow for using CSS modifications**.
 2. Open **Settings → Appearance → Custom UI Modifications**.
-3. Click **Select Folder...** and choose this `vivaldi` directory (`/Users/justin/Projects/sidecherry/vivaldi`).
+3. Click **Select Folder...** and choose this `vivaldi css hacks` directory.
 4. Restart Vivaldi.
 
 > **Tip:** Since the panel icon strip is hidden, use Vivaldi's Panel toggle button on the toolbar or `F4` (or `Ctrl+E` / `Cmd+Shift+E` / extension action) to toggle Sidebery open/closed.
