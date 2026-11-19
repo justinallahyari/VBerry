@@ -1,6 +1,31 @@
 # VBerry
 
-A Chrome Manifest V3 & Vivaldi port of [Sidebery](https://github.com/mbnuqw/sidebery) (v5.x) running natively in the browser Side Panel, with lossless bidirectional compatibility for Firefox Sidebery JSON backups and snapshots.
+A Chrome-native Manifest V3 vertical tab tree & Tab Group manager running in Chrome's Side Panel (and Vivaldi's Web Panel), with full import support for original Firefox [Sidebery](https://github.com/mbnuqw/sidebery) v5 backups and snapshots.
+
+## Features (v6.0.0 — Chrome-Native Rewrite)
+
+- **1:1 Chrome Tab Groups as Panels**: Every native Chrome Tab Group (`chrome.tabGroups`) in the current window appears as a Tabs Panel with its exact title, Chrome color, and collapse state. Ungrouped tabs live in the default `Tabs` panel, and pinned tabs live in a dedicated top strip. On Vivaldi (where `chrome.tabGroups` is unsupported), VBerry automatically falls back to persisted group panels seamlessly.
+- **Vivaldi-Aware**: Automatically detects Vivaldi and opens `chrome://vivaldi-webui/startpage` for new tabs while keeping Chrome's native New Tab Page on Chrome.
+- **Tab Trees**: Automatic parent-child nesting via `openerTabId`, drag-and-drop reordering & nesting, fold/unfold branches, indent/outdent, Shift/Cmd/Ctrl multi-select (including unloaded tabs), subtree drag-to-group, and smart active-tab unloading (switches to the last-used loaded tab or opens a new tab before discarding).
+- **Rich Context Menus**: Right-click tabs, panel pills, empty panel space, bookmarks/folders, history, recently closed sessions, and snapshots to open in a specific tab group, sort, deduplicate, fold/expand branches, unload, mute, bookmark, or snapshot.
+- **Native Chrome APIs**:
+  - `chrome.sidePanel` with `openPanelOnActionClick`
+  - `/_favicon/` endpoint (zero favicon storage bloat)
+  - `chrome.tabs.discard`, `chrome.bookmarks`, `chrome.history`, `chrome.sessions`
+  - `chrome.omnibox` (`=` keyword) for address-bar tab & bookmark switching
+  - `chrome.contextMenus` ("Send to VBerry Group") and `chrome.alarms` (auto-snapshots with configurable Snapshot Limit)
+- **Customizable UI**: Theme (Auto/Light/Dark), Density, Font Size, Tab Icon Size, UI Icon Size, and Custom Sidebar CSS.
+- **Sidebery v5 Import**: Open **Settings** (`⚙`) to import original Sidebery JSON backups (`sidebery-data-*.json`) or standalone Sidebery snapshots — including delta-compressed snapshots, panels (mapped to Chrome Tab Group colors + URL auto-group `moveRules`), compatible settings, and custom CSS.
+
+## Quick Install (Prebuilt Release)
+
+1. Download `vberry-v6.0.0.zip` from the [Releases](https://github.com/justinallahyari/VBerry/releases) page and unzip it.
+2. **Chrome**: Open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select the unzipped folder. Click the VBerry toolbar icon (or press `Ctrl+E` / `MacCtrl+E`).
+3. **Vivaldi**: Open `vivaldi://extensions`, enable **Developer mode**, click **Load unpacked**, and select the unzipped folder. Copy the extension ID and add a Web Panel pointing to:
+   ```
+   chrome-extension://<your-extension-id>/sidepanel.html
+   ```
+   *(Optional)* Enable the CSS mods in [`vivaldi css hacks/`](./vivaldi%20css%20hacks) via **Settings → Appearance → Custom UI Modifications**.
 
 ## Build from Source
 
@@ -9,43 +34,7 @@ npm install
 npm run build
 ```
 
-This outputs the unpacked extension into the `addon/` directory.
-
-## Install in Chrome
-
-1. Open `chrome://extensions` in Chrome.
-2. Enable **Developer mode** (top-right toggle).
-3. Click **Load unpacked** and select the `addon/` folder.
-4. Click the VBerry/Sidebery toolbar icon (or press `Ctrl+E` / `MacCtrl+E`) to open the Side Panel.
-
-## Install in Vivaldi
-
-1. Open `vivaldi://extensions`, enable **Developer mode**, click **Load unpacked**, and select the `addon/` folder.
-2. Copy the extension ID shown on the extension card (e.g. `gnjjocgkkenepghkaeghjoaepfcmjlnp`).
-3. Click the `+` button in Vivaldi's Panel sidebar to add a **Web Panel** with URL:
-   ```
-   chrome-extension://<your-extension-id>/sidepanel.html
-   ```
-4. *(Optional)* Right-click the Web Panel icon → **Show Mobile Version / Desktop Version** as preferred, and use Vivaldi's Panel toggle (`F4`) or toolbar button to show/hide VBerry.
-
-## Optional: Cleaner UI in Vivaldi (`vivaldi css hacks/`)
-
-The [`vivaldi css hacks/`](./vivaldi%20css%20hacks) folder contains optional Vivaldi Custom UI CSS mods that strip Vivaldi's extra panel chrome so VBerry looks like a native full-height sidebar:
-
-- `hide-panel-switch.css` — Hides Vivaldi's vertical panel icon strip (`#switch`) and removes the reserved `41px` gap when the panel is open, while collapsing the container completely when closed.
-- `hide-webpanel-header.css` — Hides the Web Panel top toolbar (URL title, Back/Forward/Reload/Home, Close) so VBerry fills the full panel height.
-- `hide-window-borders.css` — Removes the borders, margins, padding, and rounded-corner frame around `#webview-container` / `#webpage-stack` on the right and bottom of the window.
-
-### How to enable the Vivaldi CSS mods
-
-1. Open `vivaldi://experiments` and enable **Allow for using CSS modifications**.
-2. Open **Settings → Appearance → Custom UI Modifications**.
-3. Click **Select Folder...** and choose the `vivaldi css hacks/` folder.
-4. Restart Vivaldi.
-
-## Credits
-
-Forked from [mbnuqw/sidebery](https://github.com/mbnuqw/sidebery).
+This outputs the unpacked extension into `addon/`. Run `npm run package` to build and package `dist/vberry-v6.0.0.zip`.
 
 ## License
 

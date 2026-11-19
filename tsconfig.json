@@ -1,27 +1,18 @@
 {
   "compilerOptions": {
-    // "noUncheckedIndexedAccess": true,
-    "allowImportingTsExtensions": true,
-    "noEmit": true,
-    "strict": true,
-    "allowJs": false,
-    "moduleResolution": "bundler",
-    "target": "ESNext",
+    "target": "ES2022",
     "module": "ESNext",
-    "removeComments": true,
-    "preserveConstEnums": false,
-    "outDir": "./addon",
-    "jsx": "preserve",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
     "paths": {
-      "src/*": ["./src/*"]
-    },
-    "skipDefaultLibCheck": true
+      "@/*": ["./src/*"]
+    }
   },
-  "include": ["src/**/*.ts", "src/**/*.vue"],
-  "exclude": ["**/__test__/*"],
-  "vueCompilerOptions": {
-    "plugins": [
-      "@vue/language-plugin-pug"
-    ]
-  }
+  "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.vue"]
 }

@@ -1,0 +1,85 @@
+{
+  "manifest_version": 3,
+  "name": "VBerry",
+  "version": "6.0.0",
+  "description": "Chrome-native vertical tab trees, Tab Group panels, bookmarks, history, snapshots, and Sidebery import.",
+  "incognito": "split",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "Toggle VBerry Side Panel",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": [
+    "sidePanel",
+    "tabs",
+    "tabGroups",
+    "storage",
+    "unlimitedStorage",
+    "bookmarks",
+    "history",
+    "sessions",
+    "favicon",
+    "alarms",
+    "contextMenus"
+  ],
+  "omnibox": {
+    "keyword": "="
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+E",
+        "mac": "MacCtrl+E"
+      },
+      "description": "Open VBerry Side Panel"
+    },
+    "new_tab_in_panel": {
+      "suggested_key": {
+        "default": "Ctrl+Space",
+        "mac": "MacCtrl+Space"
+      },
+      "description": "Open new tab in active group"
+    },
+    "next_panel": {
+      "suggested_key": {
+        "default": "Alt+Period"
+      },
+      "description": "Switch to next panel"
+    },
+    "prev_panel": {
+      "suggested_key": {
+        "default": "Alt+Comma"
+      },
+      "description": "Switch to previous panel"
+    },
+    "focus_search": {
+      "description": "Focus search in VBerry"
+    },
+    "create_snapshot": {
+      "description": "Create tab snapshot"
+    },
+    "discard_inactive_tabs": {
+      "description": "Unload inactive tabs in current window"
+    }
+  }
+}
