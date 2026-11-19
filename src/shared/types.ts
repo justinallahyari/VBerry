@@ -21,18 +21,6 @@ export const CHROME_GROUP_COLORS: ChromeGroupColor[] = [
   'orange',
 ]
 
-export const GROUP_COLOR_HEX: Record<ChromeGroupColor, { light: string; dark: string }> = {
-  grey: { light: '#5f6368', dark: '#dadce0' },
-  blue: { light: '#1a73e8', dark: '#8ab4f8' },
-  red: { light: '#d93025', dark: '#f28b82' },
-  yellow: { light: '#e37400', dark: '#fdd663' },
-  green: { light: '#188038', dark: '#81c995' },
-  pink: { light: '#d01884', dark: '#ff8bcb' },
-  purple: { light: '#9334e6', dark: '#c58af9' },
-  cyan: { light: '#007b83', dark: '#78d9ec' },
-  orange: { light: '#fa7b17', dark: '#fcad70' },
-}
-
 export interface MoveRule {
   id: string
   active: boolean
@@ -59,6 +47,7 @@ export interface Settings {
   fontSize: number
   iconSize: number
   uiIconSize: number
+  tabControlIconSize: number
   autoCollapseInactiveGroups: boolean
   autoNestChildTabs: boolean
   showTabCounts: boolean
@@ -78,6 +67,7 @@ export const DEFAULT_SETTINGS: Settings = {
   fontSize: 13,
   iconSize: 16,
   uiIconSize: 19,
+  tabControlIconSize: 12,
   autoCollapseInactiveGroups: false,
   autoNestChildTabs: true,
   showTabCounts: true,
@@ -144,7 +134,9 @@ export type ActiveView =
   | { kind: 'history' }
   | { kind: 'snapshots' }
 
-export interface RuntimeCommandMessage {
-  type: 'vberry:command'
-  command: string
-}
+export type RuntimeMessage =
+  | { type: 'vberry:command'; command: string; windowId?: number }
+  | { type: 'vberry:panel-open'; windowId: number }
+  | { type: 'vberry:panel-close'; windowId: number }
+  | { type: 'vberry:close-panel'; windowId: number }
+  | { type: 'vberry:restore-snapshot'; snapshot: VBerrySnapshot; inNewWindow: boolean }

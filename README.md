@@ -14,12 +14,12 @@ A Chrome-native Manifest V3 vertical tab tree & Tab Group manager running in Chr
   - `chrome.tabs.discard`, `chrome.bookmarks`, `chrome.history`, `chrome.sessions`
   - `chrome.omnibox` (`=` keyword) for address-bar tab & bookmark switching
   - `chrome.contextMenus` ("Send to VBerry Group") and `chrome.alarms` (auto-snapshots with configurable Snapshot Limit)
-- **Customizable UI**: Theme (Auto/Light/Dark), Density, Font Size, Tab Icon Size, UI Icon Size, and Custom Sidebar CSS.
+- **Customizable UI**: Theme (Auto/Light/Dark), Density, Browser Mode (Auto/Chrome/Vivaldi), Font Size, Tab Icon Size, Control Bar Icon Size, Tab Close & Caret Icon Size, Keyboard Shortcuts viewer/launcher, and Custom Sidebar CSS.
 - **Sidebery v5 Import**: Open **Settings** (`⚙`) to import original Sidebery JSON backups (`sidebery-data-*.json`) or standalone Sidebery snapshots — including delta-compressed snapshots, panels (mapped to Chrome Tab Group colors + URL auto-group `moveRules`), compatible settings, and custom CSS.
 
 ## Quick Install (Prebuilt Release)
 
-1. Download `vberry-v6.2.5.zip` from the [Releases](https://github.com/justinallahyari/VBerry/releases) page and unzip it.
+1. Download `vberry-v6.3.0.zip` from the [Releases](https://github.com/justinallahyari/VBerry/releases) page and unzip it.
 2. **Chrome**: Open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select the unzipped folder. Click the VBerry toolbar icon (or press `Ctrl+E` / `MacCtrl+E`).
 3. **Vivaldi**: Open `vivaldi://extensions`, enable **Developer mode**, click **Load unpacked**, and select the unzipped folder. Copy the extension ID and add a Web Panel pointing to:
    ```
@@ -34,7 +34,7 @@ npm install
 npm run build
 ```
 
-This outputs the unpacked extension into `addon/`. Run `npm run package` to build and package `dist/vberry-v6.2.5.zip`.
+This outputs the unpacked extension into `addon/`. Run `npm run package` to build and package `dist/vberry-v6.3.0.zip`.
 
 ## License
 

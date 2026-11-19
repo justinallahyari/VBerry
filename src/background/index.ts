@@ -1,3 +1,4 @@
+import type { RuntimeMessage } from '@/shared/types'
 import {
   loadSavedPanels,
   loadSettings,
@@ -15,20 +16,92 @@ import {
   materializeSavedPanel,
   moveTabsToGroup,
   moveTabsToSavedPanel,
+  restoreSnapshot,
   safeQueryTabGroups,
   UNGROUPED_ID,
 } from '@/shared/groups'
+import {
+  persistCurrentSession,
+  restorePersistedSessionIfNeeded,
+} from '@/shared/session-state'
 
 const AUTO_SNAPSHOT_ALARM = 'vberry_auto_snapshot'
 const MENU_ROOT_ID = 'vberry_send_to_group'
+const openSidePanelWindows = new Set<number>()
+let lastFocusedWindowId = -1
+
+chrome.windows?.onFocusChanged?.addListener(winId => {
+  if (typeof winId === 'number' && winId >= 0) {
+    lastFocusedWindowId = winId
+  }
+})
+
+chrome.windows?.onRemoved?.addListener(winId => {
+  openSidePanelWindows.delete(winId)
+  if (lastFocusedWindowId === winId) lastFocusedWindowId = -1
+})
+
+chrome.tabs.onActivated.addListener(info => {
+  if (info.windowId >= 0) lastFocusedWindowId = info.windowId
+})
+
+function toggleSidePanelForWindow(winId: number): void {
+  if (winId < 0) return
+  if (openSidePanelWindows.has(winId)) {
+    openSidePanelWindows.delete(winId)
+    chrome.runtime.sendMessage({ type: 'vberry:close-panel', windowId: winId }).catch(() => {})
+    return
+  }
+  // Must be called synchronously inside user-gesture handler to preserve Chrome's user gesture
+  void chrome.sidePanel?.open?.({ windowId: winId }).catch(() => {})
+}
 
 async function initSidePanelBehavior(): Promise<void> {
   try {
-    await chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true })
+    // Handle action clicks & _execute_action (Ctrl+E) explicitly via chrome.action.onClicked
+    // so sidePanel.open({ windowId }) targets the actually focused window across multi-window sessions.
+    await chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: false })
   } catch {
     // Some Chromium forks (e.g. Vivaldi) do not implement setPanelBehavior
   }
+  try {
+    const win = await chrome.windows?.getLastFocused?.({ windowTypes: ['normal'] })
+    if (win?.id !== undefined) lastFocusedWindowId = win.id
+  } catch {
+    // Ignore
+  }
 }
+
+chrome.action?.onClicked?.addListener(tab => {
+  // Chromium's _execute_action shortcut can pass the primary window's tab instead of
+  // the currently focused window's tab; prefer tracked lastFocusedWindowId synchronously.
+  if (lastFocusedWindowId >= 0) {
+    toggleSidePanelForWindow(lastFocusedWindowId)
+    return
+  }
+  if (tab.windowId !== undefined) {
+    toggleSidePanelForWindow(tab.windowId)
+  }
+})
+
+chrome.runtime.onMessage.addListener((msg: RuntimeMessage, _sender, sendResponse) => {
+  if (!msg || typeof msg !== 'object') return
+  if (msg.type === 'vberry:panel-open' && msg.windowId >= 0) {
+    openSidePanelWindows.add(msg.windowId)
+    return
+  }
+  if (msg.type === 'vberry:panel-close' && msg.windowId >= 0) {
+    openSidePanelWindows.delete(msg.windowId)
+    return
+  }
+  if (msg.type === 'vberry:restore-snapshot') {
+    void restoreSnapshot(msg.snapshot, msg.inNewWindow)
+      .then(() => persistCurrentSession())
+      .then(() => sendResponse({ ok: true }))
+      .catch(() => sendResponse({ ok: false }))
+    return true
+  }
+})
 
 async function syncAutoSnapshotAlarm(): Promise<void> {
   const settings = await loadSettings()
@@ -48,16 +121,43 @@ function scheduleContextMenuRebuild(): void {
   }, 250)
 }
 
+let persistSessionTimer: ReturnType<typeof setTimeout> | undefined
+function schedulePersistSession(): void {
+  clearTimeout(persistSessionTimer)
+  persistSessionTimer = setTimeout(() => {
+    void persistCurrentSession()
+  }, 400)
+}
+
+let menuBuildSeq = 0
+
+function createMenuItem(props: Parameters<typeof chrome.contextMenus.create>[0]): void {
+  chrome.contextMenus.create(props, () => {
+    void chrome.runtime.lastError
+  })
+}
+
 async function rebuildContextMenus(): Promise<void> {
+  const seq = ++menuBuildSeq
   try {
-    await chrome.contextMenus.removeAll()
-    chrome.contextMenus.create({
+    // Fetch data BEFORE removeAll() so removeAll -> create() has zero awaits in between
+    const [groups, savedPanels] = await Promise.all([safeQueryTabGroups(), getSavedPanelsCached()])
+    if (seq !== menuBuildSeq) return
+
+    await new Promise<void>(resolve => {
+      chrome.contextMenus.removeAll(() => {
+        void chrome.runtime.lastError
+        resolve()
+      })
+    })
+    if (seq !== menuBuildSeq) return
+
+    createMenuItem({
       id: MENU_ROOT_ID,
       title: 'Send to VBerry Group',
       contexts: ['page', 'link'],
     })
 
-    const [groups, savedPanels] = await Promise.all([safeQueryTabGroups(), loadSavedPanels()])
     const liveTitles = new Set<string>()
     const seenIds = new Set<number>()
 
@@ -66,7 +166,7 @@ async function rebuildContextMenus(): Promise<void> {
       seenIds.add(g.id)
       const label = g.title?.trim() || `Group (${g.color})`
       liveTitles.add(label.toLowerCase())
-      chrome.contextMenus.create({
+      createMenuItem({
         id: `vberry_group_${g.id}`,
         parentId: MENU_ROOT_ID,
         title: label,
@@ -76,7 +176,7 @@ async function rebuildContextMenus(): Promise<void> {
 
     for (const sp of savedPanels) {
       if (liveTitles.has(sp.title.trim().toLowerCase())) continue
-      chrome.contextMenus.create({
+      createMenuItem({
         id: `vberry_saved_${sp.id}`,
         parentId: MENU_ROOT_ID,
         title: sp.title,
@@ -84,7 +184,7 @@ async function rebuildContextMenus(): Promise<void> {
       })
     }
 
-    chrome.contextMenus.create({
+    createMenuItem({
       id: 'vberry_group_ungroup',
       parentId: MENU_ROOT_ID,
       title: 'Ungrouped',
@@ -95,22 +195,34 @@ async function rebuildContextMenus(): Promise<void> {
   }
 }
 
-chrome.runtime.onInstalled.addListener(() => {
-  void initSidePanelBehavior()
-  void syncAutoSnapshotAlarm()
-  void rebuildContextMenus()
-})
+let cachedSavedPanels: Awaited<ReturnType<typeof loadSavedPanels>> | null = null
+async function getSavedPanelsCached() {
+  if (cachedSavedPanels === null) cachedSavedPanels = await loadSavedPanels()
+  return cachedSavedPanels
+}
 
-chrome.runtime.onStartup.addListener(() => {
+function bootstrap(): void {
   void initSidePanelBehavior()
   void syncAutoSnapshotAlarm()
   void rebuildContextMenus()
-})
+  void restorePersistedSessionIfNeeded()
+}
+
+chrome.runtime.onInstalled.addListener(bootstrap)
+chrome.runtime.onStartup.addListener(bootstrap)
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local') {
     if (changes[STORAGE_KEYS.settings]) void syncAutoSnapshotAlarm()
-    if (changes[STORAGE_KEYS.savedPanels]) scheduleContextMenuRebuild()
+    if (changes[STORAGE_KEYS.savedPanels]) {
+      cachedSavedPanels = null
+      scheduleContextMenuRebuild()
+    }
+  }
+  if (area === 'session') {
+    if (changes[STORAGE_KEYS.treeMeta] || changes[STORAGE_KEYS.virtualGroups]) {
+      schedulePersistSession()
+    }
   }
 })
 
@@ -200,13 +312,22 @@ chrome.tabs.onRemoved.addListener(async tabId => {
     delete vmap[tabId]
     await saveVirtualGroupMap(vmap)
   }
+  schedulePersistSession()
+})
+
+chrome.tabs.onMoved.addListener(() => {
+  schedulePersistSession()
 })
 
 chrome.tabs.onReplaced.addListener(async (addedTabId, removedTabId) => {
   const [meta, vmap] = await Promise.all([loadTreeMeta(), loadVirtualGroupMap()])
-  if (meta[removedTabId]) {
-    meta[addedTabId] = meta[removedTabId]
-    delete meta[removedTabId]
+  const hasMetaEntry = Boolean(meta[removedTabId])
+  const hasChildren = Object.values(meta).some(e => e.parentId === removedTabId)
+  if (hasMetaEntry || hasChildren) {
+    if (hasMetaEntry) {
+      meta[addedTabId] = meta[removedTabId]
+      delete meta[removedTabId]
+    }
     for (const entry of Object.values(meta)) {
       if (entry.parentId === removedTabId) entry.parentId = addedTabId
     }
@@ -222,8 +343,9 @@ chrome.tabs.onReplaced.addListener(async (addedTabId, removedTabId) => {
 // Apply URL moveRules from SavedPanels (including imported Sidebery moveRules)
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   const url = changeInfo.url
+  if (!url) return
+  schedulePersistSession()
   if (
-    !url ||
     tab.pinned ||
     url.startsWith('chrome://') ||
     url.startsWith('vivaldi://') ||
@@ -231,7 +353,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   ) {
     return
   }
-  const savedPanels = await loadSavedPanels()
+  const savedPanels = await getSavedPanelsCached()
   const matched = savedPanels.find(p => p.moveRules.some(r => matchesMoveRule(url, r)))
   if (!matched) return
 
@@ -239,24 +361,27 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 })
 
 // Keyboard commands
-chrome.commands.onCommand.addListener(async command => {
+chrome.commands.onCommand.addListener(async (command, tab) => {
   if (command === 'create_snapshot') {
     await captureSnapshot()
     return
   }
 
   if (command === 'discard_inactive_tabs') {
-    const windowId = await getTargetWindowId()
+    const windowId = tab?.windowId ?? (await getTargetWindowId())
     const tabs = await chrome.tabs.query(windowId >= 0 ? { windowId } : { currentWindow: true })
-    for (const t of tabs) {
-      if (t.id !== undefined && !t.active && !t.pinned && !t.audible && !t.discarded) {
-        await chrome.tabs.discard(t.id).catch(() => {})
-      }
-    }
+    await Promise.allSettled(
+      tabs
+        .filter(t => t.id !== undefined && !t.active && !t.pinned && !t.audible && !t.discarded)
+        .map(t => chrome.tabs.discard(t.id!))
+    )
     return
   }
 
-  chrome.runtime.sendMessage({ type: 'vberry:command', command }).catch(() => {})
+  const targetWinId = lastFocusedWindowId >= 0 ? lastFocusedWindowId : tab?.windowId
+  chrome.runtime
+    .sendMessage({ type: 'vberry:command', command, windowId: targetWinId })
+    .catch(() => {})
 })
 
 function escapeXml(str: string): string {

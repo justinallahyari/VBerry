@@ -12,6 +12,8 @@ export const STORAGE_KEYS = {
   snapshots: 'vberry_snapshots',
   treeMeta: 'vberry_tree_meta',
   virtualGroups: 'vberry_virtual_groups',
+  lastSession: 'vberry_last_session',
+  sessionRestored: 'vberry_session_restored',
 } as const
 
 /**
@@ -22,7 +24,7 @@ function toPlain<T>(value: T): T {
   return JSON.parse(JSON.stringify(value))
 }
 
-function toArray<T>(value: unknown): T[] {
+export function toArray<T>(value: unknown): T[] {
   if (Array.isArray(value)) return value as T[]
   if (value && typeof value === 'object') {
     return Object.values(value as Record<string, T>).filter(
@@ -101,6 +103,31 @@ export async function saveVirtualGroupMap(map: Record<number, string>): Promise<
 }
 
 /**
+ * Batched initial state read (2 storage IPCs instead of 4).
+ */
+export async function loadInitialSidepanelState(): Promise<{
+  settings: Settings
+  savedPanels: SavedPanel[]
+  treeMeta: TabTreeMap
+  virtualGroups: Record<number, string>
+}> {
+  const [localRes, sessionRes] = await Promise.all([
+    chrome.storage.local.get([STORAGE_KEYS.settings, STORAGE_KEYS.savedPanels]),
+    chrome.storage.session
+      .get([STORAGE_KEYS.treeMeta, STORAGE_KEYS.virtualGroups])
+      .catch(() => ({}) as Record<string, unknown>),
+  ])
+  return {
+    settings: { ...DEFAULT_SETTINGS, ...(localRes[STORAGE_KEYS.settings] ?? {}) },
+    savedPanels: toArray<SavedPanel>(localRes[STORAGE_KEYS.savedPanels]),
+    treeMeta: (sessionRes[STORAGE_KEYS.treeMeta] as TabTreeMap) ?? {},
+    virtualGroups: (sessionRes[STORAGE_KEYS.virtualGroups] as Record<number, string>) ?? {},
+  }
+}
+
+let cachedFaviconBase: string | null = null
+
+/**
  * Chrome native /_favicon/ endpoint (MV3 `favicon` permission).
  * Zero storage bloat, instant, always fresh.
  */
@@ -109,13 +136,23 @@ export function getChromeFaviconUrl(pageUrl?: string, size = 32): string {
     return ''
   }
   try {
-    const url = new URL(chrome.runtime.getURL('/_favicon/'))
-    url.searchParams.set('pageUrl', pageUrl)
-    url.searchParams.set('size', String(size))
-    return url.toString()
+    if (cachedFaviconBase === null) {
+      cachedFaviconBase = chrome.runtime.getURL('/_favicon/')
+    }
+    return `${cachedFaviconBase}?pageUrl=${encodeURIComponent(pageUrl)}&size=${size}`
   } catch {
     return ''
   }
+}
+
+export function downloadTextFile(filename: string, content: string, mimeType: string): void {
+  const blob = new Blob([content], { type: mimeType })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 export function uid(prefix = 'vb'): string {

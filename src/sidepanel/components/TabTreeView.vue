@@ -115,37 +115,39 @@ function onAuxClick(e: MouseEvent, tabId: number) {
           :style="{ left: `${node.level * 16 - 4}px` }"
         />
 
-        <button
-          v-if="node.hasChildren"
-          class="fold-btn"
-          :title="node.folded ? 'Expand branch' : 'Fold branch'"
-          @click.stop="emit('toggleFold', node.id)"
-        >
-          <svg
-            class="chevron"
-            :class="{ folded: node.folded }"
-            viewBox="0 0 16 16"
-            aria-hidden="true"
-          >
-            <path
-              d="M3.5 5.5 8 10.5l4.5-5"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
-          </svg>
-        </button>
+        <div class="tab-icon-slot" :class="{ 'has-children': node.hasChildren }">
+          <img
+            v-if="iconSrc(node.tab)"
+            class="favicon"
+            :src="iconSrc(node.tab)"
+            alt=""
+            loading="lazy"
+          />
+          <span v-else class="favicon-fallback">●</span>
 
-        <img
-          v-if="iconSrc(node.tab)"
-          class="favicon"
-          :src="iconSrc(node.tab)"
-          alt=""
-          loading="lazy"
-        />
-        <span v-else class="favicon-fallback">●</span>
+          <button
+            v-if="node.hasChildren"
+            class="fold-btn"
+            :title="node.folded ? 'Expand branch' : 'Fold branch'"
+            @click.stop="emit('toggleFold', node.id)"
+          >
+            <svg
+              class="chevron"
+              :class="{ folded: node.folded }"
+              viewBox="0 0 16 16"
+              aria-hidden="true"
+            >
+              <path
+                d="M3.5 5.5 8 10.5l4.5-5"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+        </div>
 
         <span class="tab-title">{{ node.tab.title || node.tab.url || 'New Tab' }}</span>
 
@@ -251,31 +253,48 @@ function onAuxClick(e: MouseEvent, tabId: number) {
   pointer-events: none;
 }
 
+.tab-icon-slot {
+  position: relative;
+  width: max(24px, var(--icon-size), calc(var(--tab-ctrl-icon-size) + 12px));
+  height: max(24px, var(--icon-size), calc(var(--tab-ctrl-icon-size) + 12px));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
 .fold-btn {
-  width: 20px;
-  height: 20px;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
   padding: 0;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--text-muted);
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+  color: var(--text);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   border-radius: 4px;
-  flex-shrink: 0;
-  transition: background 0.1s, border-color 0.1s, color 0.1s;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.1s;
 }
 
-.fold-btn:hover {
-  background: var(--bg-subtle);
-  border-color: var(--border);
-  color: var(--text);
+.tab-row:hover .tab-icon-slot.has-children .fold-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.tab-row:hover .tab-icon-slot.has-children .favicon,
+.tab-row:hover .tab-icon-slot.has-children .favicon-fallback {
+  opacity: 0;
 }
 
 .chevron {
-  width: 12px;
-  height: 12px;
+  width: var(--tab-ctrl-icon-size);
+  height: var(--tab-ctrl-icon-size);
   transition: transform 0.12s;
 }
 
@@ -289,6 +308,7 @@ function onAuxClick(e: MouseEvent, tabId: number) {
   border-radius: 3px;
   flex-shrink: 0;
   object-fit: contain;
+  transition: opacity 0.1s;
 }
 
 .favicon-fallback {
@@ -300,6 +320,7 @@ function onAuxClick(e: MouseEvent, tabId: number) {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  transition: opacity 0.1s;
 }
 
 .tab-title {
@@ -325,9 +346,9 @@ function onAuxClick(e: MouseEvent, tabId: number) {
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
-  width: 20px;
-  height: 20px;
-  border-radius: 4px;
+  width: max(24px, calc(var(--tab-ctrl-icon-size) + 12px));
+  height: max(24px, calc(var(--tab-ctrl-icon-size) + 12px));
+  border-radius: 5px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -341,8 +362,8 @@ function onAuxClick(e: MouseEvent, tabId: number) {
 }
 
 .close-btn svg {
-  width: 12px;
-  height: 12px;
+  width: var(--tab-ctrl-icon-size);
+  height: var(--tab-ctrl-icon-size);
 }
 
 .tab-row:hover .close-btn,

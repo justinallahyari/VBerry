@@ -2,31 +2,42 @@ import type { MoveRule, TabTreeMap, TreeTabNode } from './types'
 
 const MAX_TREE_DEPTH = 12
 
+function setParentId(meta: TabTreeMap, id: number, parentId: number | undefined): void {
+  const cur = meta[id]
+  if (parentId !== undefined) {
+    meta[id] = { ...cur, parentId }
+    return
+  }
+  if (!cur) return
+  const { parentId: _, ...rest } = cur
+  if (Object.keys(rest).length) meta[id] = rest
+  else delete meta[id]
+}
+
 /**
  * Build a flat, renderable tree list from a panel's ordered Chrome tabs and tree metadata.
- * Guarantees cycle safety and ensures parents belong to the same tab list (same group).
+ * Strictly O(N) via memoized level/descendant/visibility caches, cycle-safe, and scoped to `tabs`.
  */
 export function buildTabTree(tabs: chrome.tabs.Tab[], meta: TabTreeMap): TreeTabNode[] {
-  const byId = new Map<number, chrome.tabs.Tab>()
+  const validIds = new Set<number>()
   for (const t of tabs) {
-    if (t.id !== undefined) byId.set(t.id, t)
+    if (t.id !== undefined) validIds.add(t.id)
   }
 
-  // Resolve valid parentId per tab (must exist in the same panel & not create a cycle)
   const parentMap = new Map<number, number | undefined>()
   for (const t of tabs) {
     if (t.id === undefined) continue
     const rawParent = meta[t.id]?.parentId
-    if (rawParent !== undefined && rawParent !== t.id && byId.has(rawParent)) {
-      parentMap.set(t.id, rawParent)
-    } else {
-      parentMap.set(t.id, undefined)
-    }
+    parentMap.set(
+      t.id,
+      rawParent !== undefined && rawParent !== t.id && validIds.has(rawParent)
+        ? rawParent
+        : undefined
+    )
   }
 
-  // Break any accidental cycles
   const levelCache = new Map<number, number>()
-  function getLevel(id: number, visiting = new Set<number>()): number {
+  function getLevel(id: number, visiting?: Set<number>): number {
     const cached = levelCache.get(id)
     if (cached !== undefined) return cached
     const p = parentMap.get(id)
@@ -34,13 +45,14 @@ export function buildTabTree(tabs: chrome.tabs.Tab[], meta: TabTreeMap): TreeTab
       levelCache.set(id, 0)
       return 0
     }
-    if (visiting.has(p)) {
+    const seen = visiting ?? new Set<number>([id])
+    if (seen.has(p)) {
       parentMap.set(id, undefined)
       levelCache.set(id, 0)
       return 0
     }
-    visiting.add(id)
-    const lvl = Math.min(MAX_TREE_DEPTH, getLevel(p, visiting) + 1)
+    seen.add(p)
+    const lvl = Math.min(MAX_TREE_DEPTH, getLevel(p, seen) + 1)
     levelCache.set(id, lvl)
     return lvl
   }
@@ -60,22 +72,29 @@ export function buildTabTree(tabs: chrome.tabs.Tab[], meta: TabTreeMap): TreeTab
     }
   }
 
+  const descendantCache = new Map<number, number>()
   function countDescendants(id: number): number {
+    const cached = descendantCache.get(id)
+    if (cached !== undefined) return cached
     const kids = childrenMap.get(id)
-    if (!kids || kids.length === 0) return 0
+    if (!kids || kids.length === 0) {
+      descendantCache.set(id, 0)
+      return 0
+    }
     let total = kids.length
     for (const k of kids) total += countDescendants(k)
+    descendantCache.set(id, total)
     return total
   }
 
+  const hiddenCache = new Map<number, boolean>()
   function isHidden(id: number): boolean {
-    let cur = parentMap.get(id)
-    let guard = 0
-    while (cur !== undefined && guard++ < MAX_TREE_DEPTH + 1) {
-      if (meta[cur]?.folded) return true
-      cur = parentMap.get(cur)
-    }
-    return false
+    const cached = hiddenCache.get(id)
+    if (cached !== undefined) return cached
+    const p = parentMap.get(id)
+    const hidden = p !== undefined && (Boolean(meta[p]?.folded) || isHidden(p))
+    hiddenCache.set(id, hidden)
+    return hidden
   }
 
   const nodes: TreeTabNode[] = []
@@ -116,7 +135,7 @@ export function getSubtreeIds(rootId: number, tabs: chrome.tabs.Tab[], meta: Tab
 }
 
 /**
- * Indent a tab under the nearest preceding tab at the same or higher level.
+ * Indent a tab under the nearest preceding tab at the same level.
  */
 export function indentTab(tabId: number, nodes: TreeTabNode[], meta: TabTreeMap): TabTreeMap {
   const idx = nodes.findIndex(n => n.id === tabId)
@@ -141,15 +160,8 @@ export function indentTab(tabId: number, nodes: TreeTabNode[], meta: TabTreeMap)
 export function outdentTab(tabId: number, meta: TabTreeMap): TabTreeMap {
   const cur = meta[tabId]
   if (!cur?.parentId) return meta
-  const grandParent = meta[cur.parentId]?.parentId
   const next: TabTreeMap = { ...meta }
-  if (grandParent !== undefined) {
-    next[tabId] = { ...cur, parentId: grandParent }
-  } else {
-    const { parentId: _, ...rest } = cur
-    if (Object.keys(rest).length) next[tabId] = rest
-    else delete next[tabId]
-  }
+  setParentId(next, tabId, meta[cur.parentId]?.parentId)
   return next
 }
 
@@ -162,14 +174,7 @@ export function reparentOnRemove(removedTabId: number, meta: TabTreeMap): TabTre
   delete next[removedTabId]
   for (const [idStr, entry] of Object.entries(next)) {
     if (entry.parentId === removedTabId) {
-      const id = Number(idStr)
-      if (grandParent !== undefined) {
-        next[id] = { ...entry, parentId: grandParent }
-      } else {
-        const { parentId: _, ...rest } = entry
-        if (Object.keys(rest).length) next[id] = rest
-        else delete next[id]
-      }
+      setParentId(next, Number(idStr), grandParent)
     }
   }
   return next

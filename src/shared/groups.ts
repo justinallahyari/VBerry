@@ -73,11 +73,108 @@ export async function assignTabsToVirtualGroup(
   return map
 }
 
+async function unpinTabs(tabIds: number[]): Promise<void> {
+  await Promise.allSettled(
+    tabIds.map(async id => {
+      const t = await chrome.tabs.get(id)
+      if (t.pinned) await chrome.tabs.update(id, { pinned: false })
+    })
+  )
+}
+
+/**
+ * Try grouping tabs into a native Chrome Tab Group (reusing an existing group matching
+ * `title` if `reuseExisting` is true) and verify the group actually materialized.
+ */
+async function tryGroupNatively(
+  windowId: number,
+  tabIds: number[],
+  title: string,
+  color: ChromeGroupColor,
+  reuseExisting = false
+): Promise<number | null> {
+  if (!tabIds.length || !(await canUseNativeTabGroups())) return null
+  try {
+    const existing = reuseExisting
+      ? (await safeQueryTabGroups({ windowId })).find(
+          g => (g.title ?? '').trim().toLowerCase() === title.trim().toLowerCase()
+        )
+      : undefined
+
+    const groupId = existing
+      ? await chrome.tabs.group({ tabIds, groupId: existing.id })
+      : await chrome.tabs.group({ tabIds, createProperties: { windowId } })
+
+    if (typeof groupId !== 'number' || groupId === UNGROUPED_ID) return null
+    if (!existing) {
+      await chrome.tabGroups.update(groupId, { title, color, collapsed: false })
+    }
+    const live = await safeQueryTabGroups({ windowId })
+    return live.some(g => g.id === groupId) ? groupId : null
+  } catch {
+    return null
+  }
+}
+
+async function findOrCreateSavedPanel(
+  title: string,
+  color: ChromeGroupColor,
+  updateColorIfFound = false
+): Promise<SavedPanel> {
+  const panels = await loadSavedPanels()
+  let panel = panels.find(p => p.title.trim().toLowerCase() === title.trim().toLowerCase())
+  if (!panel) {
+    panel = { id: uid('panel'), title, color, moveRules: [] }
+    panels.push(panel)
+    await saveSavedPanels(panels)
+  } else if (updateColorIfFound && panel.color !== color) {
+    panel.color = color
+    await saveSavedPanels(panels)
+  }
+  return panel
+}
+
+/**
+ * Serialize a group's tabs in depth-first pre-order so every child immediately follows
+ * its true parent/siblings, guaranteeing lossless tree reconstruction from `level`.
+ */
+function treeToSnapshotTabs(tabs: chrome.tabs.Tab[], treeMeta: TabTreeMap): SnapshotTab[] {
+  const ordered = tabs.slice().sort((a, b) => a.index - b.index)
+  const nodes = buildTabTree(ordered, treeMeta)
+  const childrenByParent = new Map<number, typeof nodes>()
+  const roots: typeof nodes = []
+
+  for (const node of nodes) {
+    if (node.parentId === undefined) {
+      roots.push(node)
+    } else {
+      const list = childrenByParent.get(node.parentId)
+      if (list) list.push(node)
+      else childrenByParent.set(node.parentId, [node])
+    }
+  }
+
+  const out: SnapshotTab[] = []
+  function visit(node: (typeof nodes)[number], depth: number): void {
+    out.push({
+      url: node.tab.url || node.tab.pendingUrl || '',
+      title: node.tab.title || node.tab.url || '',
+      level: depth,
+      folded: node.folded || undefined,
+    })
+    for (const child of childrenByParent.get(node.id) ?? []) {
+      visit(child, depth + 1)
+    }
+  }
+
+  for (const root of roots) visit(root, 0)
+  return out
+}
+
 /**
  * Create a new Tab Group with an initial tab.
  * Uses Chrome's native `chrome.tabGroups` API when supported, and falls back
- * seamlessly to a persisted VBerry panel + virtual tab assignment on browsers
- * like Vivaldi that do not support `chrome.tabGroups`.
+ * seamlessly to a persisted VBerry panel + virtual tab assignment on Vivaldi.
  */
 export async function createGroupWithTab(
   windowId: number,
@@ -88,36 +185,10 @@ export async function createGroupWithTab(
   const tab = await createNewTab({ windowId, url, active: true })
   if (tab.id === undefined) throw new Error('Failed to create tab')
 
-  if (await canUseNativeTabGroups()) {
-    try {
-      const groupId = await chrome.tabs.group({
-        tabIds: tab.id,
-        createProperties: { windowId },
-      })
-      if (typeof groupId === 'number' && groupId !== UNGROUPED_ID) {
-        await chrome.tabGroups.update(groupId, { title, color, collapsed: false })
-        const live = await safeQueryTabGroups({ windowId })
-        if (live.some(g => g.id === groupId)) {
-          return { groupId, tab }
-        }
-      }
-    } catch {
-      // Browser rejected native chrome.tabs.group — fall back below
-    }
-  }
+  const groupId = await tryGroupNatively(windowId, [tab.id], title, color)
+  if (groupId !== null) return { groupId, tab }
 
-  // Fallback: create a SavedPanel and assign the tab to it in session storage
-  const panels = await loadSavedPanels()
-  let panel = panels.find(p => p.title.trim().toLowerCase() === title.trim().toLowerCase())
-  if (!panel) {
-    panel = { id: uid('panel'), title, color, moveRules: [] }
-    panels.push(panel)
-    await saveSavedPanels(panels)
-  } else if (panel.color !== color) {
-    panel.color = color
-    await saveSavedPanels(panels)
-  }
-
+  const panel = await findOrCreateSavedPanel(title, color, true)
   await assignTabsToVirtualGroup([tab.id], panel.id)
   return { groupId: null, savedPanelId: panel.id, tab }
 }
@@ -132,53 +203,18 @@ export async function materializeSavedPanel(
   url?: string,
   active = true
 ): Promise<{ groupId: number | null; savedPanelId: string; tab?: chrome.tabs.Tab }> {
-  const groups = await safeQueryTabGroups({ windowId })
-  const existing = groups.find(
-    g => (g.title ?? '').trim().toLowerCase() === panel.title.trim().toLowerCase()
-  )
-
   const tab = await createNewTab({ windowId, url, active })
+  if (tab.id === undefined) return { groupId: null, savedPanelId: panel.id, tab }
 
-  if (existing && tab.id !== undefined) {
-    try {
-      await chrome.tabs.group({ tabIds: tab.id, groupId: existing.id })
-      return { groupId: existing.id, savedPanelId: panel.id, tab }
-    } catch {
-      // Fallback below
-    }
-  }
+  const groupId = await tryGroupNatively(windowId, [tab.id], panel.title, panel.color, true)
+  if (groupId !== null) return { groupId, savedPanelId: panel.id, tab }
 
-  if (tab.id !== undefined && (await canUseNativeTabGroups())) {
-    try {
-      const groupId = await chrome.tabs.group({
-        tabIds: tab.id,
-        createProperties: { windowId },
-      })
-      if (typeof groupId === 'number' && groupId !== UNGROUPED_ID) {
-        await chrome.tabGroups.update(groupId, {
-          title: panel.title,
-          color: panel.color,
-          collapsed: false,
-        })
-        const live = await safeQueryTabGroups({ windowId })
-        if (live.some(g => g.id === groupId)) {
-          return { groupId, savedPanelId: panel.id, tab }
-        }
-      }
-    } catch {
-      // Browser does not support native chrome.tabs.group — fall back below
-    }
-  }
-
-  if (tab.id !== undefined) {
-    await assignTabsToVirtualGroup([tab.id], panel.id)
-  }
+  await assignTabsToVirtualGroup([tab.id], panel.id)
   return { groupId: null, savedPanelId: panel.id, tab }
 }
 
 /**
  * Move tabs to a Chrome Tab Group, or ungroup them if groupId === UNGROUPED_ID (-1).
- * Automatically unpins any pinned tabs before grouping and clears virtual group assignments.
  */
 export async function moveTabsToGroup(tabIds: number[], targetGroupId: number): Promise<void> {
   if (!tabIds.length) return
@@ -190,14 +226,7 @@ export async function moveTabsToGroup(tabIds: number[], targetGroupId: number): 
     return
   }
 
-  for (const id of tabIds) {
-    try {
-      const t = await chrome.tabs.get(id)
-      if (t.pinned) await chrome.tabs.update(id, { pinned: false })
-    } catch {
-      // Tab may already be closed
-    }
-  }
+  await unpinTabs(tabIds)
   await assignTabsToVirtualGroup(tabIds, null)
   await chrome.tabs.group({ tabIds, groupId: targetGroupId })
 }
@@ -211,42 +240,12 @@ export async function moveTabsToSavedPanel(
   panel: SavedPanel
 ): Promise<number | null> {
   if (!tabIds.length) return null
+  await unpinTabs(tabIds)
 
-  for (const id of tabIds) {
-    try {
-      const t = await chrome.tabs.get(id)
-      if (t.pinned) await chrome.tabs.update(id, { pinned: false })
-    } catch {
-      // Ignore closed tabs
-    }
-  }
-
-  if (await canUseNativeTabGroups()) {
-    try {
-      const groups = await safeQueryTabGroups({ windowId })
-      const existing = groups.find(
-        g => (g.title ?? '').trim().toLowerCase() === panel.title.trim().toLowerCase()
-      )
-      const groupId = existing
-        ? await chrome.tabs.group({ tabIds, groupId: existing.id })
-        : await chrome.tabs.group({ tabIds, createProperties: { windowId } })
-      if (typeof groupId === 'number' && groupId !== UNGROUPED_ID) {
-        if (!existing) {
-          await chrome.tabGroups.update(groupId, {
-            title: panel.title,
-            color: panel.color,
-            collapsed: false,
-          })
-        }
-        const live = await safeQueryTabGroups({ windowId })
-        if (live.some(g => g.id === groupId)) {
-          await assignTabsToVirtualGroup(tabIds, null)
-          return groupId
-        }
-      }
-    } catch {
-      // Fallback to virtual group assignment below
-    }
+  const groupId = await tryGroupNatively(windowId, tabIds, panel.title, panel.color, true)
+  if (groupId !== null) {
+    await assignTabsToVirtualGroup(tabIds, null)
+    return groupId
   }
 
   await assignTabsToVirtualGroup(tabIds, panel.id)
@@ -264,18 +263,17 @@ export async function syncCollapseOnSwitch(
   await Promise.allSettled(
     groups.map(g => {
       const shouldCollapse = activeGroupId !== null && g.id !== activeGroupId
-      if (g.collapsed !== shouldCollapse) {
-        return chrome.tabGroups.update(g.id, { collapsed: shouldCollapse })
-      }
-      return Promise.resolve()
+      return g.collapsed !== shouldCollapse
+        ? chrome.tabGroups.update(g.id, { collapsed: shouldCollapse })
+        : Promise.resolve()
     })
   )
 }
 
 /**
  * Unload (discard) one or more tabs. If any target tab is currently active,
- * activates the most recently accessed remaining tab first (or opens a new tab
- * if none is available) because Chrome forbids discarding the active tab.
+ * activates the most recently accessed loaded tab first (or opens a new tab
+ * if no other loaded tab exists) because Chrome forbids discarding the active tab.
  */
 export async function discardTabs(
   tabIds: number[],
@@ -284,11 +282,12 @@ export async function discardTabs(
 ): Promise<void> {
   if (!tabIds.length) return
   const targetSet = new Set(tabIds)
+  const tabById = new Map(
+    windowTabs.filter(t => t.id !== undefined).map(t => [t.id as number, t])
+  )
   const activeTarget = windowTabs.find(t => t.id !== undefined && targetSet.has(t.id) && t.active)
 
   if (activeTarget) {
-    // Only switch to another already-loaded tab so we don't wake up unloaded tabs;
-    // if no other loaded tab exists, open a fresh startpage/new tab instead.
     const loaded = windowTabs.filter(
       t => t.id !== undefined && !targetSet.has(t.id) && !t.discarded
     )
@@ -302,12 +301,11 @@ export async function discardTabs(
     }
   }
 
-  for (const id of tabIds) {
-    const t = windowTabs.find(x => x.id === id)
-    if (!t?.discarded) {
-      await chrome.tabs.discard(id).catch(() => {})
-    }
-  }
+  await Promise.allSettled(
+    tabIds
+      .filter(id => !tabById.get(id)?.discarded)
+      .map(id => chrome.tabs.discard(id))
+  )
 }
 
 /**
@@ -320,7 +318,11 @@ export async function bookmarkGroupTabs(
   const folder = await chrome.bookmarks.create({ title: title || 'VBerry Group' })
   for (const tab of tabs) {
     const url = tab.url || tab.pendingUrl
-    if (!url || url.startsWith('chrome://newtab') || url.startsWith('chrome://vivaldi-webui/startpage')) {
+    if (
+      !url ||
+      url.startsWith('chrome://newtab') ||
+      url.startsWith('chrome://vivaldi-webui/startpage')
+    ) {
       continue
     }
     await chrome.bookmarks.create({
@@ -359,26 +361,21 @@ export async function captureSnapshot(): Promise<VBerrySnapshot> {
     const tabsByNativeGroup = new Map<number, chrome.tabs.Tab[]>()
     const tabsByVirtualGroup = new Map<string, chrome.tabs.Tab[]>()
 
-    for (const tab of win.tabs) {
+    const sortedTabs = win.tabs.slice().sort((a, b) => a.index - b.index)
+    for (const tab of sortedTabs) {
       const url = tab.url || tab.pendingUrl || ''
       if (!url) continue
       if (tab.pinned) {
         pinned.push({ url, title: tab.title || url, level: 0, pinned: true })
       } else if (tab.groupId !== UNGROUPED_ID && groupById.has(tab.groupId)) {
-        let list = tabsByNativeGroup.get(tab.groupId)
-        if (!list) {
-          list = []
-          tabsByNativeGroup.set(tab.groupId, list)
-        }
-        list.push(tab)
+        const list = tabsByNativeGroup.get(tab.groupId)
+        if (list) list.push(tab)
+        else tabsByNativeGroup.set(tab.groupId, [tab])
       } else if (tab.id !== undefined && virtualGroups[tab.id] && savedById.has(virtualGroups[tab.id])) {
         const vid = virtualGroups[tab.id]
-        let list = tabsByVirtualGroup.get(vid)
-        if (!list) {
-          list = []
-          tabsByVirtualGroup.set(vid, list)
-        }
-        list.push(tab)
+        const list = tabsByVirtualGroup.get(vid)
+        if (list) list.push(tab)
+        else tabsByVirtualGroup.set(vid, [tab])
       } else {
         ungroupedTabs.push(tab)
       }
@@ -387,52 +384,34 @@ export async function captureSnapshot(): Promise<VBerrySnapshot> {
     const snapGroups: SnapshotGroup[] = []
 
     if (ungroupedTabs.length) {
-      const nodes = buildTabTree(ungroupedTabs, treeMeta)
       snapGroups.push({
         id: 'ungrouped',
         title: 'Ungrouped',
         color: 'grey',
         ungrouped: true,
-        tabs: nodes.map(n => ({
-          url: n.tab.url || n.tab.pendingUrl || '',
-          title: n.tab.title || n.tab.url || '',
-          level: n.level,
-          folded: n.folded || undefined,
-        })),
+        tabs: treeToSnapshotTabs(ungroupedTabs, treeMeta),
       })
     }
 
     for (const g of groups) {
       const gTabs = tabsByNativeGroup.get(g.id)
       if (!gTabs?.length) continue
-      const nodes = buildTabTree(gTabs, treeMeta)
       snapGroups.push({
         id: `group_${g.id}`,
         title: g.title || 'Group',
         color: g.color,
-        tabs: nodes.map(n => ({
-          url: n.tab.url || n.tab.pendingUrl || '',
-          title: n.tab.title || n.tab.url || '',
-          level: n.level,
-          folded: n.folded || undefined,
-        })),
+        tabs: treeToSnapshotTabs(gTabs, treeMeta),
       })
     }
 
     for (const [vid, vTabs] of tabsByVirtualGroup.entries()) {
       const panel = savedById.get(vid)
       if (!panel || !vTabs.length) continue
-      const nodes = buildTabTree(vTabs, treeMeta)
       snapGroups.push({
         id: panel.id,
         title: panel.title,
         color: panel.color,
-        tabs: nodes.map(n => ({
-          url: n.tab.url || n.tab.pendingUrl || '',
-          title: n.tab.title || n.tab.url || '',
-          level: n.level,
-          folded: n.folded || undefined,
-        })),
+        tabs: treeToSnapshotTabs(vTabs, treeMeta),
       })
     }
 
@@ -461,6 +440,10 @@ export async function restoreSnapshotGroup(
   group: SnapshotGroup,
   windowId: number
 ): Promise<number[]> {
+  const existingTabs = await chrome.tabs.query({ windowId }).catch(() => [])
+  const startIndex = existingTabs.length
+  let nextIndex = startIndex
+
   const createdIds: number[] = []
   const levelStack: number[] = []
   const metaPatch: TabTreeMap = {}
@@ -470,67 +453,51 @@ export async function restoreSnapshotGroup(
       continue
     }
     try {
+      // Pass explicit ascending `index` so browsers with "Open After Active Tab"
+      // (like Vivaldi) never insert children above their parent in reverse order.
       const tab = await chrome.tabs.create({
         windowId,
+        index: nextIndex++,
         url: item.url,
         active: false,
       })
       if (tab.id === undefined) continue
       createdIds.push(tab.id)
 
-      const lvl = Math.max(0, item.level || 0)
-      if (lvl > 0 && levelStack[lvl - 1] !== undefined) {
+      // Clamp depth to current stack length so skipping an invalid intermediate parent
+      // attaches descendants to the nearest surviving ancestor instead of flattening them.
+      const effectiveLvl = Math.min(Math.max(0, item.level || 0), levelStack.length)
+      if (effectiveLvl > 0) {
         metaPatch[tab.id] = {
-          parentId: levelStack[lvl - 1],
+          parentId: levelStack[effectiveLvl - 1],
           folded: item.folded || undefined,
         }
       } else if (item.folded) {
         metaPatch[tab.id] = { folded: true }
       }
-      levelStack[lvl] = tab.id
-      levelStack.length = lvl + 1
+      levelStack[effectiveLvl] = tab.id
+      levelStack.length = effectiveLvl + 1
     } catch {
       // Skip restricted/invalid URLs safely
     }
   }
 
-  if (createdIds.length && !group.ungrouped) {
-    let groupedNatively = false
-    if (await canUseNativeTabGroups()) {
-      try {
-        const groupId = await chrome.tabs.group({
-          tabIds: createdIds,
-          createProperties: { windowId },
-        })
-        if (typeof groupId === 'number' && groupId !== UNGROUPED_ID) {
-          await chrome.tabGroups.update(groupId, {
-            title: group.title,
-            color: group.color,
-            collapsed: false,
-          })
-          const live = await safeQueryTabGroups({ windowId })
-          groupedNatively = live.some(g => g.id === groupId)
-        }
-      } catch {
-        // Fall back to virtual panel below
-      }
-    }
-
-    if (!groupedNatively) {
-      const panels = await loadSavedPanels()
-      let panel = panels.find(p => p.title.trim().toLowerCase() === group.title.trim().toLowerCase())
-      if (!panel) {
-        panel = { id: uid('panel'), title: group.title, color: group.color, moveRules: [] }
-        panels.push(panel)
-        await saveSavedPanels(panels)
-      }
-      await assignTabsToVirtualGroup(createdIds, panel.id)
-    }
+  if (createdIds.length > 1) {
+    // Enforce exact parent-before-children order in case the browser ignored `index`
+    await chrome.tabs.move?.(createdIds, { windowId, index: startIndex }).catch(() => {})
   }
 
   if (Object.keys(metaPatch).length) {
     const existingMeta = await loadTreeMeta()
     await saveTreeMeta({ ...existingMeta, ...metaPatch })
+  }
+
+  if (createdIds.length && !group.ungrouped) {
+    const groupId = await tryGroupNatively(windowId, createdIds, group.title, group.color)
+    if (groupId === null) {
+      const panel = await findOrCreateSavedPanel(group.title, group.color)
+      await assignTabsToVirtualGroup(createdIds, panel.id)
+    }
   }
 
   return createdIds

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { getChromeFaviconUrl } from '@/shared/storage'
 
 const props = defineProps<{
@@ -41,6 +41,8 @@ function flatten(nodes: chrome.bookmarks.BookmarkTreeNode[], level = 0): FlatBoo
   }
   return out
 }
+
+const flatBookmarks = computed(() => flatten(tree.value))
 
 function toggleFolder(id: string) {
   const next = new Set(expanded.value)
@@ -108,7 +110,7 @@ onUnmounted(() => {
 
     <template v-else>
       <div
-        v-for="item in flatten(tree)"
+        v-for="item in flatBookmarks"
         :key="item.node.id"
         class="row"
         :style="{ paddingLeft: `${8 + item.level * 14}px` }"

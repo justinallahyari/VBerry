@@ -29,6 +29,13 @@ declare namespace chrome {
     function open(options: { windowId?: number; tabId?: number }): Promise<void>
   }
 
+  namespace action {
+    const onClicked: {
+      addListener(cb: (tab: tabs.Tab) => void): void
+      removeListener(cb: (tab: tabs.Tab) => void): void
+    }
+  }
+
   namespace tabGroups {
     type ColorEnum =
       | 'grey'
@@ -163,10 +170,15 @@ declare namespace chrome {
     }
     function getCurrent(getInfo?: { populate?: boolean }): Promise<Window>
     function get(windowId: number, getInfo?: { populate?: boolean }): Promise<Window>
+    function getLastFocused(getInfo?: { populate?: boolean; windowTypes?: string[] }): Promise<Window>
     function getAll(getInfo?: { populate?: boolean; windowTypes?: string[] }): Promise<Window[]>
     function create(createData?: { url?: string | string[]; focused?: boolean; incognito?: boolean }): Promise<Window>
     function update(windowId: number, updateInfo: { focused?: boolean }): Promise<Window>
     const onFocusChanged: {
+      addListener(cb: (windowId: number) => void): void
+      removeListener(cb: (windowId: number) => void): void
+    }
+    const onRemoved: {
       addListener(cb: (windowId: number) => void): void
       removeListener(cb: (windowId: number) => void): void
     }
@@ -248,13 +260,16 @@ declare namespace chrome {
   }
 
   namespace contextMenus {
-    function create(props: {
-      id: string
-      parentId?: string
-      title?: string
-      type?: 'normal' | 'separator'
-      contexts?: string[]
-    }): string | number
+    function create(
+      props: {
+        id: string
+        parentId?: string
+        title?: string
+        type?: 'normal' | 'separator'
+        contexts?: string[]
+      },
+      callback?: () => void
+    ): string | number
     function removeAll(callback?: () => void): Promise<void>
     const onClicked: {
       addListener(cb: (info: { menuItemId: string | number; linkUrl?: string; pageUrl?: string }, tab?: tabs.Tab) => void): void

@@ -1,26 +1,27 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   CHROME_GROUP_COLORS,
   DEFAULT_SETTINGS,
   type ActiveView,
   type ChromeGroupColor,
-  type RuntimeCommandMessage,
+  type RuntimeMessage,
   type SavedPanel,
   type Settings,
   type TabTreeMap,
 } from '@/shared/types'
 import {
+  downloadTextFile,
   getChromeFaviconUrl,
+  loadInitialSidepanelState,
   loadSavedPanels,
-  loadSettings,
   loadSnapshots,
-  loadTreeMeta,
   loadVirtualGroupMap,
   saveSavedPanels,
   saveSnapshots,
   saveTreeMeta,
   STORAGE_KEYS,
+  toArray,
 } from '@/shared/storage'
 import { createNewTab, getTargetWindowId } from '@/shared/env'
 import {
@@ -47,6 +48,7 @@ import {
   UNGROUPED_ID,
 } from '@/shared/groups'
 import { snapshotToMarkdown } from '@/shared/sidebery-import'
+import { restorePersistedSessionIfNeeded } from '@/shared/session-state'
 import TabTreeView from './components/TabTreeView.vue'
 import BookmarksView from './components/BookmarksView.vue'
 import HistoryView from './components/HistoryView.vue'
@@ -218,20 +220,23 @@ async function refreshChromeState(followActive = false, excludeRemovedIds?: Set<
   if (followActive) {
     const activeTab = tabs.value.find(t => t.active)
     if (activeTab && !activeTab.pinned) {
-      if (activeTab.groupId !== UNGROUPED_ID && winGroups.some(g => g.id === activeTab.groupId)) {
-        activeView.value = { kind: 'group', groupId: activeTab.groupId }
-      } else if (activeTab.id !== undefined && virtualGroupMap.value[activeTab.id]) {
-        const sid = virtualGroupMap.value[activeTab.id]
-        if (savedPanels.value.some(p => p.id === sid)) {
-          activeView.value = { kind: 'saved', savedId: sid }
-        } else {
-          activeView.value = { kind: 'ungrouped' }
-        }
-      } else {
-        activeView.value = { kind: 'ungrouped' }
-      }
+      activeView.value = viewForTab(activeTab, winGroups)
     }
   }
+}
+
+function viewForTab(
+  tab: chrome.tabs.Tab,
+  liveGroups: chrome.tabGroups.TabGroup[] = groups.value
+): { kind: 'ungrouped' } | { kind: 'group'; groupId: number } | { kind: 'saved'; savedId: string } {
+  if (tab.groupId !== UNGROUPED_ID && liveGroups.some(g => g.id === tab.groupId)) {
+    return { kind: 'group', groupId: tab.groupId }
+  }
+  const sid = tab.id !== undefined ? virtualGroupMap.value[tab.id] : undefined
+  if (sid && savedPanelIdSet.value.has(sid)) {
+    return { kind: 'saved', savedId: sid }
+  }
+  return { kind: 'ungrouped' }
 }
 
 function scheduleActiveSyncAfterRemove(removedIds: number[]) {
@@ -249,17 +254,12 @@ function scheduleActiveSyncAfterRemove(removedIds: number[]) {
 }
 
 async function loadStoredState() {
-  const [s, p, m, v] = await Promise.all([
-    loadSettings(),
-    loadSavedPanels(),
-    loadTreeMeta(),
-    loadVirtualGroupMap(),
-  ])
-  settings.value = s
-  savedPanels.value = p
-  treeMeta.value = m
-  virtualGroupMap.value = v
-  applyThemeAndCss(s)
+  const state = await loadInitialSidepanelState()
+  settings.value = state.settings
+  savedPanels.value = state.savedPanels
+  treeMeta.value = state.treeMeta
+  virtualGroupMap.value = state.virtualGroups
+  applyThemeAndCss(state.settings)
 }
 
 function applyThemeAndCss(s: Settings) {
@@ -270,6 +270,7 @@ function applyThemeAndCss(s: Settings) {
   root.style.setProperty('--font-size', `${s.fontSize}px`)
   root.style.setProperty('--icon-size', `${s.iconSize}px`)
   root.style.setProperty('--ui-icon-size', `${s.uiIconSize}px`)
+  root.style.setProperty('--tab-ctrl-icon-size', `${s.tabControlIconSize}px`)
 
   let styleEl = document.getElementById('vberry-custom-css') as HTMLStyleElement | null
   if (s.customCss.trim()) {
@@ -284,48 +285,40 @@ function applyThemeAndCss(s: Settings) {
   }
 }
 
-// Derived data
-const pinnedTabs = computed(() => tabs.value.filter(t => t.pinned))
-
+// Single-pass tab partitioning (replaces 4 separate full-list filters)
 const savedPanelIdSet = computed(() => new Set(savedPanels.value.map(p => p.id)))
 
-const ungroupedTabs = computed(() =>
-  tabs.value.filter(t => {
-    if (t.pinned || t.groupId !== UNGROUPED_ID) return false
-    const vid = t.id !== undefined ? virtualGroupMap.value[t.id] : undefined
-    return !vid || !savedPanelIdSet.value.has(vid)
-  })
-)
+const partitionedTabs = computed(() => {
+  const pinned: chrome.tabs.Tab[] = []
+  const ungrouped: chrome.tabs.Tab[] = []
+  const byGroupId = new Map<number, chrome.tabs.Tab[]>()
+  const bySavedId = new Map<string, chrome.tabs.Tab[]>()
+  const vmap = virtualGroupMap.value
+  const validSaved = savedPanelIdSet.value
 
-const tabsByGroupId = computed(() => {
-  const map = new Map<number, chrome.tabs.Tab[]>()
   for (const t of tabs.value) {
-    if (t.pinned || t.groupId === UNGROUPED_ID) continue
-    let list = map.get(t.groupId)
-    if (!list) {
-      list = []
-      map.set(t.groupId, list)
+    if (t.pinned) {
+      pinned.push(t)
+    } else if (t.groupId !== UNGROUPED_ID) {
+      const list = byGroupId.get(t.groupId)
+      if (list) list.push(t)
+      else byGroupId.set(t.groupId, [t])
+    } else if (t.id !== undefined && vmap[t.id] && validSaved.has(vmap[t.id])) {
+      const vid = vmap[t.id]
+      const list = bySavedId.get(vid)
+      if (list) list.push(t)
+      else bySavedId.set(vid, [t])
+    } else {
+      ungrouped.push(t)
     }
-    list.push(t)
   }
-  return map
+  return { pinned, ungrouped, byGroupId, bySavedId }
 })
 
-const tabsBySavedId = computed(() => {
-  const map = new Map<string, chrome.tabs.Tab[]>()
-  for (const t of tabs.value) {
-    if (t.pinned || t.groupId !== UNGROUPED_ID || t.id === undefined) continue
-    const vid = virtualGroupMap.value[t.id]
-    if (!vid || !savedPanelIdSet.value.has(vid)) continue
-    let list = map.get(vid)
-    if (!list) {
-      list = []
-      map.set(vid, list)
-    }
-    list.push(t)
-  }
-  return map
-})
+const pinnedTabs = computed(() => partitionedTabs.value.pinned)
+const ungroupedTabs = computed(() => partitionedTabs.value.ungrouped)
+const tabsByGroupId = computed(() => partitionedTabs.value.byGroupId)
+const tabsBySavedId = computed(() => partitionedTabs.value.bySavedId)
 
 // Saved panels that don't currently have a matching live native Chrome Tab Group in this window
 const unmaterializedSavedPanels = computed(() => {
@@ -814,21 +807,27 @@ async function itemMenuAction(action: string, target?: number | SavedPanel) {
       }
       return
     case 'snap-restore-new':
-      if (menu.kind === 'snapshot') await restoreSnapshot(menu.snapshot, true)
+      if (menu.kind === 'snapshot') {
+        const res = await chrome.runtime
+          .sendMessage<{ ok?: boolean }>({
+            type: 'vberry:restore-snapshot',
+            snapshot: JSON.parse(JSON.stringify(menu.snapshot)),
+            inNewWindow: true,
+          })
+          .catch(() => null)
+        if (!res?.ok) await restoreSnapshot(menu.snapshot, true)
+      }
       return
     case 'snap-restore-here':
       if (menu.kind === 'snapshot') await restoreSnapshot(menu.snapshot, false)
       return
     case 'snap-export-md':
       if (menu.kind === 'snapshot') {
-        const md = snapshotToMarkdown(menu.snapshot)
-        const blob = new Blob([md], { type: 'text/markdown' })
-        const blobUrl = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = blobUrl
-        a.download = `vberry-snapshot-${menu.snapshot.id}.md`
-        a.click()
-        URL.revokeObjectURL(blobUrl)
+        downloadTextFile(
+          `vberry-snapshot-${menu.snapshot.id}.md`,
+          snapshotToMarkdown(menu.snapshot),
+          'text/markdown'
+        )
       }
       return
     case 'snap-delete':
@@ -836,6 +835,29 @@ async function itemMenuAction(action: string, target?: number | SavedPanel) {
         const all = await loadSnapshots()
         await saveSnapshots(all.filter(s => s.id !== menu.snapshot.id))
         await snapshotsViewRef.value?.reload()
+      }
+      return
+    case 'snap-restore-window-new':
+    case 'snap-restore-window-here':
+      if (menu.kind === 'snapshot-window') {
+        const singleSnap = {
+          id: `win_${Date.now()}`,
+          time: Date.now(),
+          windows: [menu.window],
+        }
+        const inNewWindow = action === 'snap-restore-window-new'
+        if (inNewWindow) {
+          const res = await chrome.runtime
+            .sendMessage<{ ok?: boolean }>({
+              type: 'vberry:restore-snapshot',
+              snapshot: JSON.parse(JSON.stringify(singleSnap)),
+              inNewWindow: true,
+            })
+            .catch(() => null)
+          if (!res?.ok) await restoreSnapshot(singleSnap, true)
+        } else {
+          await restoreSnapshot(singleSnap, false)
+        }
       }
       return
     case 'snap-restore-group':
@@ -883,10 +905,12 @@ async function tabMenuAction(action: string, target?: number | SavedPanel) {
       await chrome.tabs.duplicate(tab.id)
       break
     case 'pin':
-      for (const id of ids) {
-        const t = tabs.value.find(x => x.id === id)
-        if (t) await chrome.tabs.update(id, { pinned: !t.pinned }).catch(() => {})
-      }
+      await Promise.allSettled(
+        ids.map(id => {
+          const t = tabs.value.find(x => x.id === id)
+          return t ? chrome.tabs.update(id, { pinned: !t.pinned }) : Promise.resolve()
+        })
+      )
       break
     case 'mute':
       await chrome.tabs.update(tab.id, { muted: !tab.mutedInfo?.muted }).catch(() => {})
@@ -1023,19 +1047,19 @@ async function groupMenuAction(action: string) {
     }
     case 'mute-all': {
       const anyUnmuted = panelTabs.some(t => !t.mutedInfo?.muted)
-      for (const t of panelTabs) {
-        if (t.id !== undefined) {
-          await chrome.tabs.update(t.id, { muted: anyUnmuted }).catch(() => {})
-        }
-      }
+      await Promise.allSettled(
+        panelTabs
+          .filter(t => t.id !== undefined)
+          .map(t => chrome.tabs.update(t.id!, { muted: anyUnmuted }))
+      )
       return
     }
     case 'discard':
-      for (const t of panelTabs) {
-        if (t.id !== undefined && !t.active && !t.discarded) {
-          await chrome.tabs.discard(t.id).catch(() => {})
-        }
-      }
+      await Promise.allSettled(
+        panelTabs
+          .filter(t => t.id !== undefined && !t.active && !t.discarded)
+          .map(t => chrome.tabs.discard(t.id!))
+      )
       return
     case 'bookmark':
       if (panelTabs.length) await bookmarkGroupTabs(panelTitle, panelTabs)
@@ -1092,8 +1116,14 @@ function cyclePanel(dir: 1 | -1) {
   void selectView(views[nextIdx])
 }
 
-function onRuntimeMessage(msg: RuntimeCommandMessage) {
-  if (msg?.type !== 'vberry:command') return
+function onRuntimeMessage(msg: RuntimeMessage) {
+  if (!msg || typeof msg !== 'object') return
+  if (msg.type === 'vberry:close-panel') {
+    if (msg.windowId === windowId.value) window.close()
+    return
+  }
+  if (msg.type !== 'vberry:command') return
+  if (msg.windowId !== undefined && msg.windowId !== windowId.value) return
   if (msg.command === 'new_tab_in_panel') void openNewTabInActiveView()
   else if (msg.command === 'next_panel') cyclePanel(1)
   else if (msg.command === 'prev_panel') cyclePanel(-1)
@@ -1116,12 +1146,7 @@ function onStorageChanged(changes: Record<string, chrome.storage.StorageChange>,
       applyThemeAndCss(settings.value)
     }
     if (changes[STORAGE_KEYS.savedPanels]) {
-      const nextRaw = changes[STORAGE_KEYS.savedPanels].newValue
-      const nextPanels: SavedPanel[] = Array.isArray(nextRaw)
-        ? nextRaw
-        : nextRaw && typeof nextRaw === 'object'
-          ? (Object.values(nextRaw) as SavedPanel[]).filter(v => v && typeof v === 'object')
-          : []
+      const nextPanels = toArray<SavedPanel>(changes[STORAGE_KEYS.savedPanels].newValue)
       savedPanels.value = nextPanels
       const curView = activeView.value
       if (curView.kind === 'saved' && !nextPanels.some(p => p.id === curView.savedId)) {
@@ -1160,28 +1185,13 @@ function onTabActivated(info: { tabId: number; windowId: number }) {
   if (isUtility) return
   const tab = tabs.value.find(t => t.id === info.tabId)
   if (tab && !tab.pinned) {
-    if (tab.groupId !== UNGROUPED_ID) {
-      activeView.value = { kind: 'group', groupId: tab.groupId }
-    } else if (tab.id !== undefined && virtualGroupMap.value[tab.id]) {
-      const sid = virtualGroupMap.value[tab.id]
-      activeView.value = savedPanelIdSet.value.has(sid)
-        ? { kind: 'saved', savedId: sid }
-        : { kind: 'ungrouped' }
-    } else {
-      activeView.value = { kind: 'ungrouped' }
-    }
+    activeView.value = viewForTab(tab)
   }
 }
 
 function openOptions() {
   void chrome.runtime.openOptionsPage()
 }
-
-watch(
-  () => settings.value,
-  s => applyThemeAndCss(s),
-  { deep: true }
-)
 
 function onKeyDown(e: KeyboardEvent) {
   if (e.key === 'Escape') closeMenus()
@@ -1191,9 +1201,19 @@ function onWindowFocusChanged() {
   scheduleRefresh()
 }
 
+function notifyPanelClosed() {
+  if (windowId.value >= 0) {
+    chrome.runtime.sendMessage({ type: 'vberry:panel-close', windowId: windowId.value }).catch(() => {})
+  }
+}
+
 onMounted(async () => {
+  await restorePersistedSessionIfNeeded()
   await loadStoredState()
   await refreshChromeState(true)
+  if (windowId.value >= 0) {
+    chrome.runtime.sendMessage({ type: 'vberry:panel-open', windowId: windowId.value }).catch(() => {})
+  }
 
   chrome.tabs.onCreated.addListener(scheduleRefresh)
   chrome.tabs.onUpdated.addListener(scheduleRefresh)
@@ -1216,10 +1236,12 @@ onMounted(async () => {
   window.addEventListener('blur', closeMenus)
   window.addEventListener('focus', scheduleRefresh)
   window.addEventListener('keydown', onKeyDown)
+  window.addEventListener('pagehide', notifyPanelClosed)
   document.addEventListener('visibilitychange', closeMenus)
 })
 
 onUnmounted(() => {
+  notifyPanelClosed()
   clearTimeout(refreshTimer)
   clearActiveRetryTimers()
   chrome.tabs.onCreated.removeListener(scheduleRefresh)
@@ -1243,6 +1265,7 @@ onUnmounted(() => {
   window.removeEventListener('blur', closeMenus)
   window.removeEventListener('focus', scheduleRefresh)
   window.removeEventListener('keydown', onKeyDown)
+  window.removeEventListener('pagehide', notifyPanelClosed)
   document.removeEventListener('visibilitychange', closeMenus)
 })
 </script>
@@ -1688,6 +1711,12 @@ onUnmounted(() => {
       <!-- Recently closed window session -->
       <template v-else-if="itemMenu.kind === 'session'">
         <button @click="itemMenuAction('restore-session')">Restore Window</button>
+      </template>
+
+      <!-- Snapshot window -->
+      <template v-else-if="itemMenu.kind === 'snapshot-window'">
+        <button @click="itemMenuAction('snap-restore-window-new')">Restore Window in New Window</button>
+        <button @click="itemMenuAction('snap-restore-window-here')">Restore Window Here</button>
       </template>
 
       <!-- Snapshot group -->

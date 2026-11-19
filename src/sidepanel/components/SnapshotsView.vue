@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import type { SnapshotGroup, SnapshotTab, VBerrySnapshot } from '@/shared/types'
-import { loadSnapshots, saveSnapshots } from '@/shared/storage'
+import type { SnapshotGroup, SnapshotTab, SnapshotWindow, VBerrySnapshot } from '@/shared/types'
+import { downloadTextFile, loadSnapshots, saveSnapshots } from '@/shared/storage'
 import { getTargetWindowId } from '@/shared/env'
 import { captureSnapshot, restoreSnapshot, restoreSnapshotGroup } from '@/shared/groups'
 import { snapshotToMarkdown } from '@/shared/sidebery-import'
 
 export type SnapshotContextTarget =
   | { kind: 'snapshot'; snapshot: VBerrySnapshot }
+  | { kind: 'snapshot-window'; window: SnapshotWindow }
   | { kind: 'snapshot-group'; group: SnapshotGroup }
   | { kind: 'snapshot-tab'; tab: SnapshotTab }
 
@@ -45,7 +46,36 @@ function countTabs(snap: VBerrySnapshot): number {
 }
 
 async function restoreAll(snap: VBerrySnapshot, newWindow: boolean) {
+  // Run new-window restores in the background service worker so focus changes
+  // or side panel closing can never interrupt tree restoration.
+  if (newWindow) {
+    try {
+      const res = await chrome.runtime.sendMessage<{ ok?: boolean }>({
+        type: 'vberry:restore-snapshot',
+        snapshot: JSON.parse(JSON.stringify(snap)),
+        inNewWindow: true,
+      })
+      if (res?.ok) return
+    } catch {
+      // Fall back to direct restore below
+    }
+  }
   await restoreSnapshot(snap, newWindow)
+}
+
+async function restoreWindow(win: SnapshotWindow, newWindow = true) {
+  const singleWinSnap: VBerrySnapshot = {
+    id: `win_${Date.now()}`,
+    time: Date.now(),
+    windows: [win],
+  }
+  await restoreAll(singleWinSnap, newWindow)
+}
+
+function countWindowTabs(win: SnapshotWindow): number {
+  let n = win.pinned.length
+  for (const g of win.groups) n += g.tabs.length
+  return n
 }
 
 async function restoreGroup(group: SnapshotGroup) {
@@ -56,14 +86,7 @@ async function restoreGroup(group: SnapshotGroup) {
 }
 
 function exportMd(snap: VBerrySnapshot) {
-  const md = snapshotToMarkdown(snap)
-  const blob = new Blob([md], { type: 'text/markdown' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `vberry-snapshot-${snap.id}.md`
-  a.click()
-  URL.revokeObjectURL(url)
+  downloadTextFile(`vberry-snapshot-${snap.id}.md`, snapshotToMarkdown(snap), 'text/markdown')
 }
 
 async function removeSnapshot(id: string) {
@@ -117,7 +140,28 @@ onMounted(load)
         </div>
 
         <div v-for="(win, wi) in snap.windows" :key="wi" class="snap-win">
-          <div v-if="snap.windows.length > 1" class="win-title">Window {{ wi + 1 }}</div>
+          <div
+            class="win-head"
+            @contextmenu.prevent="emit('contextMenu', { kind: 'snapshot-window', window: win }, $event)"
+          >
+            <span class="win-title">Window {{ wi + 1 }} ({{ countWindowTabs(win) }})</span>
+            <button class="link-btn" @click="restoreWindow(win, true)">Restore Window</button>
+          </div>
+          <div v-if="win.pinned.length" class="snap-group">
+            <div class="snap-group-head">
+              <span class="g-name">📌 Pinned ({{ win.pinned.length }})</span>
+            </div>
+            <div
+              v-for="(pt, pti) in win.pinned"
+              :key="`p_${pti}`"
+              class="snap-tab"
+              style="padding-left: 10px"
+              :title="pt.url"
+              @contextmenu.prevent="emit('contextMenu', { kind: 'snapshot-tab', tab: pt }, $event)"
+            >
+              {{ pt.title || pt.url }}
+            </div>
+          </div>
           <div v-for="g in win.groups" :key="g.id" class="snap-group">
             <div
               class="snap-group-head"
@@ -135,7 +179,7 @@ onMounted(load)
               :title="t.url"
               @contextmenu.prevent="emit('contextMenu', { kind: 'snapshot-tab', tab: t }, $event)"
             >
-              {{ t.title || t.url }}
+              <span v-if="t.level > 0" class="tree-prefix">↳ </span>{{ t.title || t.url }}
             </div>
           </div>
         </div>
@@ -287,11 +331,20 @@ onMounted(load)
   padding: 1px 0;
 }
 
+.win-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin: 6px 0 4px;
+  padding-bottom: 2px;
+  border-bottom: 1px solid var(--border);
+}
+
 .win-title {
   font-size: 11px;
   font-weight: 600;
   color: var(--text-muted);
-  margin: 4px 0;
 }
 
 .empty {

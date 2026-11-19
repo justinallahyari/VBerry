@@ -8,6 +8,7 @@ import {
   type Settings,
 } from '@/shared/types'
 import {
+  downloadTextFile,
   loadSavedPanels,
   loadSettings,
   loadSnapshots,
@@ -16,6 +17,7 @@ import {
   saveSnapshots,
   uid,
 } from '@/shared/storage'
+import { isVivaldi } from '@/shared/env'
 import {
   executeImport,
   exportBackupJson,
@@ -26,6 +28,7 @@ import {
 
 const settings = ref<Settings>({ ...DEFAULT_SETTINGS })
 const savedPanels = ref<SavedPanel[]>([])
+const commands = ref<chrome.commands.Command[]>([])
 const statusMsg = ref('')
 
 // Import state
@@ -44,8 +47,23 @@ const newPanelTitle = ref('')
 const newPanelColor = ref<ChromeGroupColor>('blue')
 const newRulePatterns = ref<Record<string, string>>({})
 
+async function loadCommands() {
+  try {
+    commands.value = await chrome.commands.getAll()
+  } catch {
+    commands.value = []
+  }
+}
+
+async function openShortcutsPage() {
+  const url = (await isVivaldi())
+    ? 'vivaldi://extensions/shortcuts'
+    : 'chrome://extensions/shortcuts'
+  await chrome.tabs.create({ url, active: true }).catch(() => {})
+}
+
 async function load() {
-  const [s, p] = await Promise.all([loadSettings(), loadSavedPanels()])
+  const [s, p] = await Promise.all([loadSettings(), loadSavedPanels(), loadCommands()])
   settings.value = s
   savedPanels.value = p
   applyTheme(s)
@@ -152,16 +170,13 @@ async function runImport() {
 
 async function exportData() {
   const { filename, json } = await exportBackupJson()
-  const blob = new Blob([json], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
+  downloadTextFile(filename, json, 'application/json')
 }
 
-onMounted(load)
+onMounted(() => {
+  void load()
+  window.addEventListener('focus', loadCommands)
+})
 </script>
 
 <template>
@@ -314,8 +329,8 @@ onMounted(load)
 
       <div class="setting-row">
         <div>
-          <div class="label">UI Icon Size</div>
-          <div class="desc">Adjust toolbar, settings, and close button icon size ({{ settings.uiIconSize }}px).</div>
+          <div class="label">Control Bar Icon Size</div>
+          <div class="desc">Adjust top control bar icons (Bookmarks, History, Snapshots, Settings, +) ({{ settings.uiIconSize }}px).</div>
         </div>
         <div class="range-wrap">
           <input
@@ -327,6 +342,24 @@ onMounted(load)
             @input="updateSetting('uiIconSize', Number(($event.target as HTMLInputElement).value))"
           />
           <span class="range-val">{{ settings.uiIconSize }}px</span>
+        </div>
+      </div>
+
+      <div class="setting-row">
+        <div>
+          <div class="label">Tab Close &amp; Caret Icon Size</div>
+          <div class="desc">Adjust the close (×) and tree caret icon size on tabs ({{ settings.tabControlIconSize }}px).</div>
+        </div>
+        <div class="range-wrap">
+          <input
+            type="range"
+            min="8"
+            max="20"
+            step="1"
+            :value="settings.tabControlIconSize"
+            @input="updateSetting('tabControlIconSize', Number(($event.target as HTMLInputElement).value))"
+          />
+          <span class="range-val">{{ settings.tabControlIconSize }}px</span>
         </div>
       </div>
 
@@ -405,6 +438,27 @@ onMounted(load)
           :value="settings.maxSnapshots"
           @change="updateSetting('maxSnapshots', Math.max(1, Math.min(500, Math.round(Number(($event.target as HTMLInputElement).value) || 30))))"
         />
+      </div>
+    </section>
+
+    <!-- Keyboard Shortcuts (Chrome / Vivaldi native extension commands) -->
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <h2>Keyboard Shortcuts</h2>
+          <p class="hint">
+            Default toggle shortcut is <code>Ctrl+E</code> (<code>Control+E</code> on macOS).
+            Customize any shortcut in the browser's native Extensions Shortcuts page.
+          </p>
+        </div>
+        <button class="btn-primary" @click="openShortcutsPage">Change Shortcuts…</button>
+      </div>
+
+      <div v-for="cmd in commands" :key="cmd.name" class="setting-row">
+        <div class="label">
+          {{ cmd.description || (cmd.name === '_execute_action' ? 'Open VBerry Side Panel' : cmd.name) }}
+        </div>
+        <kbd class="kbd">{{ cmd.shortcut || 'Not set' }}</kbd>
       </div>
     </section>
 
@@ -515,6 +569,23 @@ onMounted(load)
 .card h2 {
   margin: 0 0 8px;
   font-size: 15px;
+}
+
+.card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.kbd {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .hint {
