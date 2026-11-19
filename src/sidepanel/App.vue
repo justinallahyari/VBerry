@@ -364,12 +364,17 @@ async function activateTab(tabId: number, e: MouseEvent) {
   if (e.shiftKey) {
     e.preventDefault()
     const visible = activeTabList.value.filter(n => !n.hidden).map(n => n.id)
-    const anchorId = lastClickedId.value ?? tabs.value.find(t => t.active)?.id ?? null
+    const activeId = tabs.value.find(t => t.active)?.id ?? null
+    const anchorId =
+      selectedIds.value.size > 0
+        ? (lastClickedId.value ?? activeId)
+        : (activeId ?? lastClickedId.value)
     const a = anchorId !== null ? visible.indexOf(anchorId) : -1
     const b = visible.indexOf(tabId)
     if (a !== -1 && b !== -1) {
       const [start, end] = a < b ? [a, b] : [b, a]
       selectedIds.value = new Set(visible.slice(start, end + 1))
+      lastClickedId.value = anchorId
     } else {
       selectedIds.value = new Set([tabId])
       lastClickedId.value = tabId
@@ -1032,6 +1037,8 @@ function onStorageChanged(changes: Record<string, chrome.storage.StorageChange>,
 
 function onTabActivated(info: { tabId: number; windowId: number }) {
   if (info.windowId !== windowId.value) return
+  lastClickedId.value = info.tabId
+  selectedIds.value = new Set()
   scheduleRefresh()
   const isUtility =
     activeView.value.kind === 'bookmarks' ||

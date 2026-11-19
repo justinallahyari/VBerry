@@ -19,7 +19,7 @@ A Chrome-native Manifest V3 vertical tab tree & Tab Group manager running in Chr
 
 ## Quick Install (Prebuilt Release)
 
-1. Download `vberry-v6.1.0.zip` from the [Releases](https://github.com/justinallahyari/VBerry/releases) page and unzip it.
+1. Download `vberry-v6.2.0.zip` from the [Releases](https://github.com/justinallahyari/VBerry/releases) page and unzip it.
 2. **Chrome**: Open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select the unzipped folder. Click the VBerry toolbar icon (or press `Ctrl+E` / `MacCtrl+E`).
 3. **Vivaldi**: Open `vivaldi://extensions`, enable **Developer mode**, click **Load unpacked**, and select the unzipped folder. Copy the extension ID and add a Web Panel pointing to:
    ```
@@ -34,7 +34,7 @@ npm install
 npm run build
 ```
 
-This outputs the unpacked extension into `addon/`. Run `npm run package` to build and package `dist/vberry-v6.1.0.zip`.
+This outputs the unpacked extension into `addon/`. Run `npm run package` to build and package `dist/vberry-v6.2.0.zip`.
 
 ## License
 
