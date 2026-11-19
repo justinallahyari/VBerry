@@ -55,6 +55,7 @@ export interface SavedPanel {
 export interface Settings {
   theme: 'auto' | 'light' | 'dark'
   density: 'compact' | 'comfortable'
+  browserMode: 'auto' | 'chrome' | 'vivaldi'
   fontSize: number
   iconSize: number
   uiIconSize: number
@@ -73,6 +74,7 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = {
   theme: 'auto',
   density: 'comfortable',
+  browserMode: 'auto',
   fontSize: 13,
   iconSize: 16,
   uiIconSize: 19,

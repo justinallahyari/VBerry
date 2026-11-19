@@ -168,4 +168,34 @@ describe('Vivaldi detection & Tab Groups fallback', () => {
     expect(createMock).toHaveBeenCalledWith({ windowId: 1, active: true })
     expect(discardMock).toHaveBeenCalledWith(2)
   })
+
+  it('detects Windows Vivaldi when createNewTab lands on about:blank and redirects to startpage', async () => {
+    installChromeMock({ vivaldiTab: false })
+    const updateMock = vi.fn(async () => ({}))
+    ;(globalThis as any).chrome.tabs.update = updateMock
+    ;(globalThis as any).chrome.tabs.create = vi.fn(async () => ({
+      id: 77,
+      index: 0,
+      windowId: 1,
+      active: true,
+      pinned: false,
+      highlighted: true,
+      incognito: false,
+      groupId: -1,
+      url: 'about:blank',
+    }))
+
+    expect(await isVivaldi()).toBe(false)
+    await createNewTab({ windowId: 1 })
+    expect(updateMock).toHaveBeenCalledWith(77, { url: VIVALDI_STARTPAGE_URL })
+    expect(await isVivaldi()).toBe(true)
+  })
+
+  it('detects Vivaldi via window extData even without vivExtData on tabs', async () => {
+    installChromeMock({ vivaldiTab: false })
+    ;(globalThis as any).chrome.windows = {
+      getAll: vi.fn(async () => [{ id: 1, focused: true, extData: '{}' }]),
+    }
+    expect(await isVivaldi()).toBe(true)
+  })
 })

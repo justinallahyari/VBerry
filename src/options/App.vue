@@ -263,6 +263,21 @@ onMounted(load)
 
       <div class="setting-row">
         <div>
+          <div class="label">Browser Mode</div>
+          <div class="desc">Auto-detect Chrome vs Vivaldi (Vivaldi uses Start Page &amp; virtual groups).</div>
+        </div>
+        <select
+          :value="settings.browserMode"
+          @change="updateSetting('browserMode', ($event.target as HTMLSelectElement).value as Settings['browserMode'])"
+        >
+          <option value="auto">Auto-detect</option>
+          <option value="chrome">Chrome</option>
+          <option value="vivaldi">Vivaldi</option>
+        </select>
+      </div>
+
+      <div class="setting-row">
+        <div>
           <div class="label">Font Size</div>
           <div class="desc">Adjust sidebar text size ({{ settings.fontSize }}px).</div>
         </div>
