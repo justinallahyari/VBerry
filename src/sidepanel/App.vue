@@ -104,6 +104,14 @@ const itemMenu = ref<
 const dragOverPanelKey = ref<string | null>(null)
 
 let refreshTimer: ReturnType<typeof setTimeout> | undefined
+let activeRetryTimers: ReturnType<typeof setTimeout>[] = []
+let refreshSeq = 0
+const activeTabId = ref<number | null>(null)
+
+function clearActiveRetryTimers() {
+  for (const t of activeRetryTimers) clearTimeout(t)
+  activeRetryTimers = []
+}
 
 function scheduleRefresh() {
   clearTimeout(refreshTimer)
@@ -112,7 +120,62 @@ function scheduleRefresh() {
   }, 40)
 }
 
-async function refreshChromeState(followActive = false) {
+async function resolveWindowActiveTabId(
+  winTabs: chrome.tabs.Tab[],
+  excludeIds?: Set<number>
+): Promise<{ id: number | null; authoritative: boolean }> {
+  const validIds = new Set(winTabs.map(t => t.id).filter((id): id is number => id !== undefined))
+  const direct = winTabs.find(
+    t => t.active && t.id !== undefined && !excludeIds?.has(t.id)
+  )
+  if (direct?.id !== undefined) return { id: direct.id, authoritative: true }
+
+  // Query active tab explicitly (works even when the window is unfocused in Vivaldi/Chromium)
+  try {
+    const activeInWin = await chrome.tabs.query({ windowId: windowId.value, active: true })
+    const match = activeInWin.find(
+      t => t.id !== undefined && validIds.has(t.id) && !excludeIds?.has(t.id)
+    )
+    if (match?.id !== undefined) return { id: match.id, authoritative: true }
+  } catch {
+    // Fallback below
+  }
+
+  try {
+    const win = await chrome.windows.get(windowId.value, { populate: true })
+    const match = win.tabs?.find(
+      t => t.active && t.id !== undefined && validIds.has(t.id) && !excludeIds?.has(t.id)
+    )
+    if (match?.id !== undefined) return { id: match.id, authoritative: true }
+  } catch {
+    // Fallback below
+  }
+
+  try {
+    const anyActive = await chrome.tabs.query({ active: true })
+    const match = anyActive.find(
+      t => t.id !== undefined && validIds.has(t.id) && !excludeIds?.has(t.id)
+    )
+    if (match?.id !== undefined) return { id: match.id, authoritative: true }
+  } catch {
+    // Fallback below
+  }
+
+  const highlighted = winTabs.find(
+    t => t.highlighted && t.id !== undefined && !excludeIds?.has(t.id)
+  )
+  if (highlighted?.id !== undefined) return { id: highlighted.id, authoritative: false }
+
+  // Final fallback for unfocused Vivaldi windows where every tab transiently reports
+  // active: false after closing a tab: pick the most recently accessed remaining tab.
+  const remaining = winTabs
+    .filter(t => t.id !== undefined && !excludeIds?.has(t.id))
+    .sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))
+  return { id: remaining[0]?.id ?? null, authoritative: false }
+}
+
+async function refreshChromeState(followActive = false, excludeRemovedIds?: Set<number>) {
+  const seq = ++refreshSeq
   if (windowId.value < 0) {
     windowId.value = await getTargetWindowId()
   }
@@ -122,8 +185,26 @@ async function refreshChromeState(followActive = false) {
     chrome.tabs.query({ windowId: windowId.value }),
     safeQueryTabGroups({ windowId: windowId.value }),
   ])
+  if (seq !== refreshSeq) return
 
-  tabs.value = winTabs.sort((a, b) => a.index - b.index)
+  const resolved = await resolveWindowActiveTabId(winTabs, excludeRemovedIds)
+  if (seq !== refreshSeq) return
+
+  if (resolved.authoritative && resolved.id !== null) {
+    clearActiveRetryTimers()
+    activeTabId.value = resolved.id
+  } else if (
+    activeTabId.value === null ||
+    !winTabs.some(t => t.id === activeTabId.value) ||
+    excludeRemovedIds?.has(activeTabId.value)
+  ) {
+    activeTabId.value = resolved.id
+  }
+
+  const effectiveActiveId = resolved.authoritative ? resolved.id : activeTabId.value
+  tabs.value = winTabs
+    .sort((a, b) => a.index - b.index)
+    .map(t => (effectiveActiveId !== null ? { ...t, active: t.id === effectiveActiveId } : t))
   groups.value = winGroups
 
   // Keep active view valid if a Chrome Tab Group was closed
@@ -135,7 +216,7 @@ async function refreshChromeState(followActive = false) {
   }
 
   if (followActive) {
-    const activeTab = winTabs.find(t => t.active)
+    const activeTab = tabs.value.find(t => t.active)
     if (activeTab && !activeTab.pinned) {
       if (activeTab.groupId !== UNGROUPED_ID && winGroups.some(g => g.id === activeTab.groupId)) {
         activeView.value = { kind: 'group', groupId: activeTab.groupId }
@@ -150,6 +231,20 @@ async function refreshChromeState(followActive = false) {
         activeView.value = { kind: 'ungrouped' }
       }
     }
+  }
+}
+
+function scheduleActiveSyncAfterRemove(removedIds: number[]) {
+  const removedSet = new Set(removedIds)
+  clearActiveRetryTimers()
+  // Immediately refresh + follow-up checks until Vivaldi reports the authoritative active tab
+  void refreshChromeState(false, removedSet)
+  for (const delay of [60, 200, 450]) {
+    activeRetryTimers.push(
+      setTimeout(() => {
+        void refreshChromeState(false, removedSet)
+      }, delay)
+    )
   }
 }
 
@@ -391,6 +486,7 @@ async function closeTab(tabId: number) {
   const ids = selectedIds.value.has(tabId) ? [...selectedIds.value] : [tabId]
   selectedIds.value = new Set()
   await chrome.tabs.remove(ids).catch(() => {})
+  scheduleActiveSyncAfterRemove(ids)
 }
 
 async function handleToggleFold(tabId: number) {
@@ -1035,10 +1131,27 @@ function onStorageChanged(changes: Record<string, chrome.storage.StorageChange>,
   }
 }
 
-function onTabActivated(info: { tabId: number; windowId: number }) {
+function onTabRemoved(tabId: number, info: { windowId: number; isWindowClosing: boolean }) {
+  if (info.isWindowClosing) return
+  if (info.windowId !== windowId.value && !tabs.value.some(t => t.id === tabId)) return
+  scheduleActiveSyncAfterRemove([tabId])
+}
+
+function onTabHighlighted(info: { tabIds: number[]; windowId: number }) {
   if (info.windowId !== windowId.value) return
+  scheduleRefresh()
+}
+
+function onTabActivated(info: { tabId: number; windowId: number }) {
+  if (info.windowId !== windowId.value && !tabs.value.some(t => t.id === info.tabId)) return
+  refreshSeq++ // Supersede any older in-flight refresh so it cannot overwrite this activation
+  activeTabId.value = info.tabId
   lastClickedId.value = info.tabId
   selectedIds.value = new Set()
+  // Optimistically update active highlight immediately even in unfocused windows
+  if (tabs.value.some(t => t.id === info.tabId)) {
+    tabs.value = tabs.value.map(t => ({ ...t, active: t.id === info.tabId }))
+  }
   scheduleRefresh()
   const isUtility =
     activeView.value.kind === 'bookmarks' ||
@@ -1074,17 +1187,23 @@ function onKeyDown(e: KeyboardEvent) {
   if (e.key === 'Escape') closeMenus()
 }
 
+function onWindowFocusChanged() {
+  scheduleRefresh()
+}
+
 onMounted(async () => {
   await loadStoredState()
   await refreshChromeState(true)
 
   chrome.tabs.onCreated.addListener(scheduleRefresh)
   chrome.tabs.onUpdated.addListener(scheduleRefresh)
-  chrome.tabs.onRemoved.addListener(scheduleRefresh)
+  chrome.tabs.onRemoved.addListener(onTabRemoved)
   chrome.tabs.onMoved.addListener(scheduleRefresh)
   chrome.tabs.onAttached.addListener(scheduleRefresh)
   chrome.tabs.onDetached.addListener(scheduleRefresh)
   chrome.tabs.onActivated.addListener(onTabActivated)
+  chrome.tabs.onHighlighted?.addListener(onTabHighlighted)
+  chrome.windows?.onFocusChanged?.addListener(onWindowFocusChanged)
 
   chrome.tabGroups?.onCreated?.addListener(scheduleRefresh)
   chrome.tabGroups?.onUpdated?.addListener(scheduleRefresh)
@@ -1095,18 +1214,23 @@ onMounted(async () => {
   chrome.runtime.onMessage.addListener(onRuntimeMessage)
   window.addEventListener('click', closeMenus)
   window.addEventListener('blur', closeMenus)
+  window.addEventListener('focus', scheduleRefresh)
   window.addEventListener('keydown', onKeyDown)
   document.addEventListener('visibilitychange', closeMenus)
 })
 
 onUnmounted(() => {
+  clearTimeout(refreshTimer)
+  clearActiveRetryTimers()
   chrome.tabs.onCreated.removeListener(scheduleRefresh)
   chrome.tabs.onUpdated.removeListener(scheduleRefresh)
-  chrome.tabs.onRemoved.removeListener(scheduleRefresh)
+  chrome.tabs.onRemoved.removeListener(onTabRemoved)
   chrome.tabs.onMoved.removeListener(scheduleRefresh)
   chrome.tabs.onAttached.removeListener(scheduleRefresh)
   chrome.tabs.onDetached.removeListener(scheduleRefresh)
   chrome.tabs.onActivated.removeListener(onTabActivated)
+  chrome.tabs.onHighlighted?.removeListener(onTabHighlighted)
+  chrome.windows?.onFocusChanged?.removeListener(onWindowFocusChanged)
 
   chrome.tabGroups?.onCreated?.removeListener(scheduleRefresh)
   chrome.tabGroups?.onUpdated?.removeListener(scheduleRefresh)
@@ -1117,6 +1241,7 @@ onUnmounted(() => {
   chrome.runtime.onMessage.removeListener(onRuntimeMessage)
   window.removeEventListener('click', closeMenus)
   window.removeEventListener('blur', closeMenus)
+  window.removeEventListener('focus', scheduleRefresh)
   window.removeEventListener('keydown', onKeyDown)
   document.removeEventListener('visibilitychange', closeMenus)
 })

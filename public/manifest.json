@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "VBerry",
-  "version": "6.2.0",
+  "version": "6.2.5",
   "description": "Chrome-native vertical tab trees, Tab Group panels, bookmarks, history, snapshots, and Sidebery import.",
   "incognito": "split",
   "icons": {

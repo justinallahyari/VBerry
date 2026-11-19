@@ -131,6 +131,10 @@ declare namespace chrome {
       addListener(cb: (info: { tabId: number; windowId: number }) => void): void
       removeListener(cb: (info: { tabId: number; windowId: number }) => void): void
     }
+    const onHighlighted: {
+      addListener(cb: (info: { tabIds: number[]; windowId: number }) => void): void
+      removeListener(cb: (info: { tabIds: number[]; windowId: number }) => void): void
+    }
     const onMoved: {
       addListener(cb: (tabId: number, moveInfo: { windowId: number; fromIndex: number; toIndex: number }) => void): void
       removeListener(cb: (tabId: number, moveInfo: { windowId: number; fromIndex: number; toIndex: number }) => void): void
@@ -158,9 +162,14 @@ declare namespace chrome {
       tabs?: tabs.Tab[]
     }
     function getCurrent(getInfo?: { populate?: boolean }): Promise<Window>
+    function get(windowId: number, getInfo?: { populate?: boolean }): Promise<Window>
     function getAll(getInfo?: { populate?: boolean; windowTypes?: string[] }): Promise<Window[]>
     function create(createData?: { url?: string | string[]; focused?: boolean; incognito?: boolean }): Promise<Window>
     function update(windowId: number, updateInfo: { focused?: boolean }): Promise<Window>
+    const onFocusChanged: {
+      addListener(cb: (windowId: number) => void): void
+      removeListener(cb: (windowId: number) => void): void
+    }
   }
 
   namespace storage {
