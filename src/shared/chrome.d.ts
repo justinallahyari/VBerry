@@ -232,9 +232,11 @@ declare namespace chrome {
       children?: BookmarkTreeNode[]
     }
     function getTree(): Promise<BookmarkTreeNode[]>
+    function getChildren(id: string): Promise<BookmarkTreeNode[]>
     function getRecent(numberOfItems: number): Promise<BookmarkTreeNode[]>
     function search(query: string): Promise<BookmarkTreeNode[]>
     function create(bookmark: { parentId?: string; title?: string; url?: string; index?: number }): Promise<BookmarkTreeNode>
+    function move(id: string, destination: { parentId?: string; index?: number }): Promise<BookmarkTreeNode>
     function remove(id: string): Promise<void>
     function removeTree(id: string): Promise<void>
     function update(id: string, changes: { title?: string; url?: string }): Promise<BookmarkTreeNode>
@@ -242,6 +244,7 @@ declare namespace chrome {
     const onRemoved: { addListener(cb: () => void): void; removeListener(cb: () => void): void }
     const onChanged: { addListener(cb: () => void): void; removeListener(cb: () => void): void }
     const onMoved: { addListener(cb: () => void): void; removeListener(cb: () => void): void }
+    const onChildrenReordered: { addListener(cb: () => void): void; removeListener(cb: () => void): void }
   }
 
   namespace history {

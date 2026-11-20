@@ -540,7 +540,7 @@ export async function exportBackupJson(): Promise<{ filename: string; json: stri
   ])
 
   const payload = {
-    vberryVersion: '6.4.0',
+    vberryVersion: '6.4.1',
     exportedAt: Date.now(),
     settings: { ...DEFAULT_SETTINGS, ...settings },
     savedPanels,

@@ -34,6 +34,13 @@ import {
   restoreSnapshotGroup,
   UNGROUPED_ID,
 } from '@/shared/groups'
+import {
+  countFolderItems,
+  isRootBookmarkFolder,
+  normalizeBookmarkUrl,
+  sortFolderBookmarks,
+  type BookmarkFolderOption,
+} from '@/shared/bookmarks'
 import { snapshotToMarkdown } from '@/shared/sidebery-import'
 import { useChromeWindow } from './composables/useChromeWindow'
 import TabTreeView from './components/TabTreeView.vue'
@@ -41,6 +48,7 @@ import BookmarksView from './components/BookmarksView.vue'
 import HistoryView from './components/HistoryView.vue'
 import SnapshotsView from './components/SnapshotsView.vue'
 import GroupModal, { type GroupModalState } from './components/GroupModal.vue'
+import BookmarkModal, { type BookmarkModalState } from './components/BookmarkModal.vue'
 import SidePanelMenus, {
   type GroupMenuPayload,
   type GroupMenuState,
@@ -61,6 +69,8 @@ const historyViewRef = ref<InstanceType<typeof HistoryView> | null>(null)
 const snapshotsViewRef = ref<InstanceType<typeof SnapshotsView> | null>(null)
 
 const groupModal = ref<GroupModalState | null>(null)
+const bookmarkModal = ref<BookmarkModalState | null>(null)
+const bookmarkModalFolders = ref<BookmarkFolderOption[]>([])
 const tabMenu = ref<TabMenuState | null>(null)
 const groupMenu = ref<GroupMenuState | null>(null)
 const itemMenu = ref<ItemMenuState | null>(null)
@@ -440,13 +450,6 @@ async function submitGroupModal() {
 }
 
 // Context menu helpers
-function clampMenuPos(e: MouseEvent, estW = 195, estH = 280) {
-  return {
-    x: Math.max(4, Math.min(e.clientX, window.innerWidth - estW)),
-    y: Math.max(4, Math.min(e.clientY, window.innerHeight - estH)),
-  }
-}
-
 function closeMenus() {
   tabMenu.value = null
   groupMenu.value = null
@@ -455,12 +458,12 @@ function closeMenus() {
 
 function openTabContextMenu(tab: chrome.tabs.Tab, e: MouseEvent) {
   closeMenus()
-  tabMenu.value = { tab, ...clampMenuPos(e, 190, 280) }
+  tabMenu.value = { tab, x: e.clientX, y: e.clientY }
 }
 
 function openGroupContextMenu(menu: GroupMenuPayload, e: MouseEvent) {
   closeMenus()
-  groupMenu.value = { ...menu, ...clampMenuPos(e, 195, 340) }
+  groupMenu.value = { ...menu, x: e.clientX, y: e.clientY }
 }
 
 function openActivePanelContextMenu(e: MouseEvent) {
@@ -478,7 +481,118 @@ function openActivePanelContextMenu(e: MouseEvent) {
 
 function openItemContextMenu(payload: ItemMenuPayload, e: MouseEvent) {
   closeMenus()
-  itemMenu.value = { ...payload, ...clampMenuPos(e, 195, 280) }
+  itemMenu.value = { ...payload, x: e.clientX, y: e.clientY }
+}
+
+const activeTabForBookmark = computed(() => {
+  const t = tabs.value.find(tab => tab.active)
+  const url = t?.url || t?.pendingUrl
+  if (!t || !url) return null
+  return { title: t.title || url, url }
+})
+
+function openAddBookmarkModal(parentId?: string, index?: number) {
+  const folders = bookmarksViewRef.value?.getFolders() ?? []
+  const resolvedParent = parentId || bookmarksViewRef.value?.getDefaultFolderId() || '1'
+  bookmarkModalFolders.value = folders
+  bookmarkModal.value = {
+    mode: 'add-bookmark',
+    title: '',
+    url: '',
+    parentId: resolvedParent,
+    index,
+    focusField: 'title',
+  }
+}
+
+function openAddFolderModal(parentId?: string) {
+  const folders = bookmarksViewRef.value?.getFolders() ?? []
+  const resolvedParent = parentId || bookmarksViewRef.value?.getDefaultFolderId() || '1'
+  bookmarkModalFolders.value = folders
+  bookmarkModal.value = {
+    mode: 'add-folder',
+    title: '',
+    url: '',
+    parentId: resolvedParent,
+    focusField: 'title',
+  }
+}
+
+function openEditBookmarkModal(
+  node: chrome.bookmarks.BookmarkTreeNode,
+  focusField: 'title' | 'parent' = 'title'
+) {
+  if (isRootBookmarkFolder(node)) return
+  const isFolder = !node.url
+  const folders = bookmarksViewRef.value?.getFolders(isFolder ? node.id : undefined) ?? []
+  const fallbackParent = bookmarksViewRef.value?.getDefaultFolderId() || '1'
+  bookmarkModalFolders.value = folders
+  bookmarkModal.value = {
+    mode: isFolder ? 'edit-folder' : 'edit-bookmark',
+    nodeId: node.id,
+    originalParentId: node.parentId || fallbackParent,
+    title: node.title || '',
+    url: node.url || '',
+    parentId: node.parentId || fallbackParent,
+    focusField,
+  }
+}
+
+async function bookmarkActiveTabInFolder(parentId?: string) {
+  const active = activeTabForBookmark.value
+  const resolvedParent = parentId || bookmarksViewRef.value?.getDefaultFolderId() || '1'
+  if (!active?.url) {
+    openAddBookmarkModal(resolvedParent)
+    return
+  }
+  await chrome.bookmarks
+    .create({
+      parentId: resolvedParent,
+      title: active.title || active.url,
+      url: active.url,
+    })
+    .catch(() => {})
+  bookmarksViewRef.value?.expandFolder(resolvedParent)
+}
+
+async function submitBookmarkModal() {
+  const m = bookmarkModal.value
+  if (!m) return
+  const title = m.title.trim()
+  if (!title) return
+
+  if (m.mode === 'add-bookmark') {
+    const url = normalizeBookmarkUrl(m.url)
+    if (!url) return
+    await chrome.bookmarks
+      .create({
+        parentId: m.parentId,
+        title,
+        url,
+        ...(m.index !== undefined ? { index: m.index } : {}),
+      })
+      .catch(() => {})
+    bookmarksViewRef.value?.expandFolder(m.parentId)
+  } else if (m.mode === 'add-folder') {
+    await chrome.bookmarks.create({ parentId: m.parentId, title }).catch(() => {})
+    bookmarksViewRef.value?.expandFolder(m.parentId)
+  } else if (m.mode === 'edit-bookmark' && m.nodeId) {
+    const url = normalizeBookmarkUrl(m.url)
+    if (!url) return
+    await chrome.bookmarks.update(m.nodeId, { title, url }).catch(() => {})
+    if (m.parentId && m.parentId !== m.originalParentId) {
+      await chrome.bookmarks.move(m.nodeId, { parentId: m.parentId }).catch(() => {})
+      bookmarksViewRef.value?.expandFolder(m.parentId)
+    }
+  } else if (m.mode === 'edit-folder' && m.nodeId) {
+    await chrome.bookmarks.update(m.nodeId, { title }).catch(() => {})
+    if (m.parentId && m.parentId !== m.originalParentId) {
+      await chrome.bookmarks.move(m.nodeId, { parentId: m.parentId }).catch(() => {})
+      bookmarksViewRef.value?.expandFolder(m.parentId)
+    }
+  }
+
+  bookmarkModal.value = null
 }
 
 async function requestDiscardTabs(ids: number[]) {
@@ -572,10 +686,71 @@ async function itemMenuAction(action: string, target?: number | SavedPanel) {
         await refreshChromeState()
       }
       return
+    case 'edit-bookmark':
+      if (menu.kind === 'bookmark') openEditBookmarkModal(menu.node, 'title')
+      return
+    case 'move-bookmark':
+      if (menu.kind === 'bookmark') openEditBookmarkModal(menu.node, 'parent')
+      return
+    case 'add-bookmark-below':
+      if (menu.kind === 'bookmark') {
+        openAddBookmarkModal(
+          menu.node.parentId,
+          menu.node.index !== undefined ? menu.node.index + 1 : undefined
+        )
+      }
+      return
+    case 'reveal-bookmark':
+      if (menu.kind === 'bookmark') {
+        searchQuery.value = ''
+        searchCursor.value = -1
+        await nextTick()
+        await bookmarksViewRef.value?.revealBookmark(menu.node.id)
+      }
+      return
+    case 'add-bookmark-in-folder':
+      if (menu.kind === 'bookmark') openAddBookmarkModal(menu.node.id)
+      return
+    case 'bookmark-active-in-folder':
+      if (menu.kind === 'bookmark') await bookmarkActiveTabInFolder(menu.node.id)
+      return
+    case 'add-subfolder':
+      if (menu.kind === 'bookmark') openAddFolderModal(menu.node.id)
+      return
+    case 'sort-folder-title':
+      if (menu.kind === 'bookmark') await sortFolderBookmarks(menu.node.id, 'title')
+      return
+    case 'sort-folder-url':
+      if (menu.kind === 'bookmark') await sortFolderBookmarks(menu.node.id, 'url')
+      return
+    case 'edit-folder':
+      if (menu.kind === 'bookmark') openEditBookmarkModal(menu.node, 'title')
+      return
+    case 'add-bookmark-root':
+      openAddBookmarkModal()
+      return
+    case 'bookmark-active-root':
+      await bookmarkActiveTabInFolder()
+      return
+    case 'add-folder-root':
+      openAddFolderModal()
+      return
+    case 'expand-all-folders':
+      bookmarksViewRef.value?.expandAll()
+      return
+    case 'collapse-all-folders':
+      bookmarksViewRef.value?.collapseAll()
+      return
     case 'delete-bookmark':
       if (menu.kind === 'bookmark') {
+        if (isRootBookmarkFolder(menu.node)) return
         if (!menu.node.url) {
-          if (!confirm(`Delete folder "${menu.node.title}" and all its bookmarks?`)) return
+          const count = countFolderItems(menu.node)
+          const msg =
+            count > 0
+              ? `Delete folder "${menu.node.title}" and its ${count} item${count === 1 ? '' : 's'}?`
+              : `Delete empty folder "${menu.node.title}"?`
+          if (!confirm(msg)) return
           await chrome.bookmarks.removeTree(menu.node.id).catch(() => {})
         } else {
           await chrome.bookmarks.remove(menu.node.id).catch(() => {})
@@ -909,8 +1084,16 @@ function triggerQuickSearch(view: SpotlightView) {
 
 function onKeyDown(e: KeyboardEvent) {
   if (e.key === 'Escape') {
-    const hadMenu = !!(tabMenu.value || groupMenu.value || itemMenu.value || groupModal.value)
+    const hadMenu = !!(
+      tabMenu.value ||
+      groupMenu.value ||
+      itemMenu.value ||
+      groupModal.value ||
+      bookmarkModal.value
+    )
     closeMenus()
+    if (bookmarkModal.value) bookmarkModal.value = null
+    if (groupModal.value) groupModal.value = null
     if (isQuickSearch && !hadMenu && !searchQuery.value) {
       e.preventDefault()
       void finishQuickSearch()
@@ -1166,8 +1349,17 @@ onUnmounted(() => {
       ref="bookmarksViewRef"
       :query="searchQuery"
       :active-index="searchCursor"
+      :can-bookmark-active-tab="Boolean(activeTabForBookmark?.url)"
       @open-url="(url, bg) => openUrlFromSearchView(url, bg)"
-      @context-menu="(node, e) => openItemContextMenu({ kind: 'bookmark', node }, e)"
+      @context-menu="
+        (node, e) =>
+          openItemContextMenu({ kind: 'bookmark', node, fromSearch: Boolean(searchQuery.trim()) }, e)
+      "
+      @panel-context-menu="e => openItemContextMenu({ kind: 'bookmark-panel' }, e)"
+      @add-bookmark="parentId => openAddBookmarkModal(parentId)"
+      @add-folder="parentId => openAddFolderModal(parentId)"
+      @bookmark-active-tab="parentId => bookmarkActiveTabInFolder(parentId)"
+      @edit-bookmark="node => openEditBookmarkModal(node)"
     />
     <HistoryView
       v-else-if="activeView.kind === 'history'"
@@ -1206,6 +1398,17 @@ onUnmounted(() => {
       @submit="submitGroupModal"
       @update:title="v => groupModal && (groupModal.title = v)"
       @update:color="v => groupModal && (groupModal.color = v)"
+    />
+
+    <BookmarkModal
+      :modal="bookmarkModal"
+      :folders="bookmarkModalFolders"
+      :active-tab="activeTabForBookmark"
+      @close="bookmarkModal = null"
+      @submit="submitBookmarkModal"
+      @update:title="v => bookmarkModal && (bookmarkModal.title = v)"
+      @update:url="v => bookmarkModal && (bookmarkModal.url = v)"
+      @update:parent-id="v => bookmarkModal && (bookmarkModal.parentId = v)"
     />
 
     <SidePanelMenus

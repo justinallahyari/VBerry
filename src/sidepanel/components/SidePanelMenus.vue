@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { nextTick, ref, watch } from 'vue'
 import type { SavedPanel } from '@/shared/types'
 import { UNGROUPED_ID } from '@/shared/groups'
 import type { SnapshotContextTarget } from './SnapshotsView.vue'
@@ -13,14 +14,15 @@ export type GroupMenuPayload =
 export type GroupMenuState = GroupMenuPayload & { x: number; y: number }
 
 export type ItemMenuPayload =
-  | { kind: 'bookmark'; node: chrome.bookmarks.BookmarkTreeNode }
+  | { kind: 'bookmark'; node: chrome.bookmarks.BookmarkTreeNode; fromSearch?: boolean }
+  | { kind: 'bookmark-panel' }
   | { kind: 'history'; item: chrome.history.HistoryItem }
   | { kind: 'session'; session: chrome.sessions.Session }
   | SnapshotContextTarget
 
 export type ItemMenuState = ItemMenuPayload & { x: number; y: number }
 
-defineProps<{
+const props = defineProps<{
   tabMenu: TabMenuState | null
   groupMenu: GroupMenuState | null
   itemMenu: ItemMenuState | null
@@ -33,14 +35,55 @@ const emit = defineEmits<{
   groupAction: [action: string]
   itemAction: [action: string, target?: number | SavedPanel]
 }>()
+
+const tabMenuRef = ref<HTMLElement | null>(null)
+const groupMenuRef = ref<HTMLElement | null>(null)
+const itemMenuRef = ref<HTMLElement | null>(null)
+const pos = ref<{ x: number; y: number }>({ x: 0, y: 0 })
+
+async function positionMenu(anchor: { x: number; y: number } | null, elRef: typeof tabMenuRef) {
+  if (!anchor) return
+  pos.value = { x: anchor.x, y: anchor.y }
+  await nextTick()
+  const el = elRef.value
+  if (!el) return
+  const rect = el.getBoundingClientRect()
+  const pad = 6
+  const maxX = Math.max(pad, window.innerWidth - rect.width - pad)
+  const x = anchor.x + rect.width <= window.innerWidth - pad ? Math.max(pad, anchor.x) : maxX
+
+  let y = anchor.y
+  if (anchor.y + rect.height > window.innerHeight - pad) {
+    // Flip upward from the cursor when near the bottom edge, otherwise clamp inside viewport
+    y =
+      anchor.y - rect.height >= pad
+        ? anchor.y - rect.height
+        : Math.max(pad, window.innerHeight - rect.height - pad)
+  }
+  pos.value = { x: Math.round(x), y: Math.round(y) }
+}
+
+watch(
+  () => props.tabMenu,
+  m => void positionMenu(m, tabMenuRef)
+)
+watch(
+  () => props.groupMenu,
+  m => void positionMenu(m, groupMenuRef)
+)
+watch(
+  () => props.itemMenu,
+  m => void positionMenu(m, itemMenuRef)
+)
 </script>
 
 <template>
   <!-- Tab Context Menu -->
   <div
     v-if="tabMenu"
+    ref="tabMenuRef"
     class="ctx-menu"
-    :style="{ left: `${tabMenu.x}px`, top: `${tabMenu.y}px` }"
+    :style="{ left: `${pos.x}px`, top: `${pos.y}px` }"
     @click.stop
   >
     <button @click="emit('tabAction', 'new-child')">New Child Tab</button>
@@ -80,8 +123,9 @@ const emit = defineEmits<{
   <!-- Panel / Group Context Menu -->
   <div
     v-if="groupMenu"
+    ref="groupMenuRef"
     class="ctx-menu"
-    :style="{ left: `${groupMenu.x}px`, top: `${groupMenu.y}px` }"
+    :style="{ left: `${pos.x}px`, top: `${pos.y}px` }"
     @click.stop
   >
     <button @click="emit('groupAction', 'new-tab')">New Tab</button>
@@ -121,8 +165,9 @@ const emit = defineEmits<{
   <!-- Bookmarks / History / Snapshots Context Menu -->
   <div
     v-if="itemMenu"
+    ref="itemMenuRef"
     class="ctx-menu"
-    :style="{ left: `${itemMenu.x}px`, top: `${itemMenu.y}px` }"
+    :style="{ left: `${pos.x}px`, top: `${pos.y}px` }"
     @click.stop
   >
     <template
@@ -158,14 +203,21 @@ const emit = defineEmits<{
         {{ sp.title }}
       </button>
       <hr />
+      <template v-if="itemMenu.kind === 'bookmark'">
+        <button @click="emit('itemAction', 'edit-bookmark')">Edit Bookmark…</button>
+        <button @click="emit('itemAction', 'move-bookmark')">Move to Folder…</button>
+        <button @click="emit('itemAction', 'add-bookmark-below')">Add Bookmark Below…</button>
+        <button v-if="itemMenu.fromSearch" @click="emit('itemAction', 'reveal-bookmark')">
+          Reveal in Tree
+        </button>
+      </template>
       <button @click="emit('itemAction', 'copy-url')">Copy URL</button>
-      <button
-        v-if="itemMenu.kind === 'bookmark'"
-        class="danger"
-        @click="emit('itemAction', 'delete-bookmark')"
-      >
-        Delete Bookmark
-      </button>
+      <template v-if="itemMenu.kind === 'bookmark'">
+        <hr />
+        <button class="danger" @click="emit('itemAction', 'delete-bookmark')">
+          Delete Bookmark
+        </button>
+      </template>
       <button
         v-if="itemMenu.kind === 'history'"
         class="danger"
@@ -178,10 +230,29 @@ const emit = defineEmits<{
     <template v-else-if="itemMenu.kind === 'bookmark' && !itemMenu.node.url">
       <button @click="emit('itemAction', 'open-folder-tabs')">Open All in New Tabs</button>
       <button @click="emit('itemAction', 'open-folder-group')">Open All as Tab Group</button>
+      <hr />
+      <button @click="emit('itemAction', 'add-bookmark-in-folder')">Add Bookmark Here…</button>
+      <button @click="emit('itemAction', 'bookmark-active-in-folder')">
+        Bookmark Active Tab Here
+      </button>
+      <button @click="emit('itemAction', 'add-subfolder')">New Subfolder…</button>
+      <hr />
+      <button @click="emit('itemAction', 'sort-folder-title')">Sort by Title</button>
+      <button @click="emit('itemAction', 'sort-folder-url')">Sort by URL</button>
       <template v-if="itemMenu.node.parentId && itemMenu.node.parentId !== '0'">
         <hr />
+        <button @click="emit('itemAction', 'edit-folder')">Rename / Move Folder…</button>
         <button class="danger" @click="emit('itemAction', 'delete-bookmark')">Delete Folder</button>
       </template>
+    </template>
+
+    <template v-else-if="itemMenu.kind === 'bookmark-panel'">
+      <button @click="emit('itemAction', 'add-bookmark-root')">Add Bookmark…</button>
+      <button @click="emit('itemAction', 'bookmark-active-root')">Bookmark Active Tab</button>
+      <button @click="emit('itemAction', 'add-folder-root')">New Folder…</button>
+      <hr />
+      <button @click="emit('itemAction', 'expand-all-folders')">Expand All Folders</button>
+      <button @click="emit('itemAction', 'collapse-all-folders')">Collapse All Folders</button>
     </template>
 
     <template v-else-if="itemMenu.kind === 'snapshot'">
