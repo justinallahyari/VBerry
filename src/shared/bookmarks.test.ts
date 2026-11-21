@@ -1,13 +1,17 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   collectBookmarkFolders,
+  collectTrashBookmarkIds,
   computeBookmarkDropDestination,
   countFolderItems,
   getBookmarkAncestorIds,
   isBookmarkDescendant,
   isRootBookmarkFolder,
+  isTrashBookmarkFolder,
   normalizeBookmarkUrl,
+  searchNonTrashBookmarks,
   sortFolderBookmarks,
+  stripTrashFolders,
 } from './bookmarks'
 
 const sampleTree: chrome.bookmarks.BookmarkTreeNode[] = [
@@ -136,5 +140,52 @@ describe('bookmark helpers', () => {
       ['b1', { parentId: '1', index: 2 }],
       ['b2', { parentId: '1', index: 3 }],
     ])
+  })
+
+  it('strips Vivaldi Trash folders and excludes trashed bookmarks from search', async () => {
+    const treeWithTrash: chrome.bookmarks.BookmarkTreeNode[] = [
+      {
+        id: '0',
+        title: '',
+        children: [
+          ...sampleTree[0].children!,
+          {
+            id: '999',
+            parentId: '0',
+            title: 'Trash',
+            children: [
+              { id: 't1', parentId: '999', title: 'Deleted Site', url: 'https://deleted.example' },
+              {
+                id: 't2',
+                parentId: '999',
+                title: 'Deleted Folder',
+                children: [
+                  { id: 't3', parentId: 't2', title: 'Deep Deleted', url: 'https://deep.example' },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ]
+
+    expect(isTrashBookmarkFolder(treeWithTrash[0].children![2])).toBe(true)
+    expect([...collectTrashBookmarkIds(treeWithTrash)].sort()).toEqual(['999', 't1', 't2', 't3'])
+    expect(stripTrashFolders(treeWithTrash)[0].children!.map(c => c.id)).toEqual(['1', '2'])
+    expect(collectBookmarkFolders(treeWithTrash).map(f => f.id)).not.toContain('999')
+
+    ;(globalThis as unknown as { chrome: unknown }).chrome = {
+      bookmarks: {
+        getTree: vi.fn(async () => treeWithTrash),
+        search: vi.fn(async () => [
+          { id: '10', parentId: '1', title: 'Alpha', url: 'https://alpha.example' },
+          { id: 't1', parentId: '999', title: 'Deleted Site', url: 'https://deleted.example' },
+          { id: 't3', parentId: 't2', title: 'Deep Deleted', url: 'https://deep.example' },
+        ]),
+      },
+    }
+
+    const results = await searchNonTrashBookmarks('example')
+    expect(results.map(r => r.id)).toEqual(['10'])
   })
 })

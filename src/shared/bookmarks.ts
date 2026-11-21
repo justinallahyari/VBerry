@@ -14,6 +14,71 @@ export function isRootBookmarkFolder(node: chrome.bookmarks.BookmarkTreeNode): b
   return node.id === '0' || !node.parentId || node.parentId === '0'
 }
 
+/**
+ * Detect Vivaldi's built-in Trash bookmark folder (and any trash-typed folder).
+ */
+export function isTrashBookmarkFolder(node: chrome.bookmarks.BookmarkTreeNode): boolean {
+  if (node.url) return false
+  const rec = node as chrome.bookmarks.BookmarkTreeNode & {
+    trash?: boolean
+    folderType?: string
+  }
+  if (rec.trash === true || rec.folderType === 'trash') return true
+  if (node.id.toLowerCase() === 'trash') return true
+  if (node.parentId === '0' && (node.title ?? '').trim().toLowerCase() === 'trash') return true
+  return false
+}
+
+/**
+ * Collect the IDs of every Trash folder and all descendant folders/bookmarks inside it.
+ */
+export function collectTrashBookmarkIds(
+  nodes: chrome.bookmarks.BookmarkTreeNode[],
+  insideTrash = false,
+  out = new Set<string>()
+): Set<string> {
+  for (const n of nodes) {
+    const isTrash = insideTrash || isTrashBookmarkFolder(n)
+    if (isTrash) out.add(n.id)
+    if (n.children) collectTrashBookmarkIds(n.children, isTrash, out)
+  }
+  return out
+}
+
+/**
+ * Return a copy of the bookmark tree with Trash folders (and their descendants) removed.
+ */
+export function stripTrashFolders(
+  nodes: chrome.bookmarks.BookmarkTreeNode[]
+): chrome.bookmarks.BookmarkTreeNode[] {
+  const out: chrome.bookmarks.BookmarkTreeNode[] = []
+  for (const n of nodes) {
+    if (isTrashBookmarkFolder(n)) continue
+    if (n.children) {
+      out.push({ ...n, children: stripTrashFolders(n.children) })
+    } else {
+      out.push(n)
+    }
+  }
+  return out
+}
+
+/**
+ * Search bookmarks while excluding any item inside a Trash folder.
+ */
+export async function searchNonTrashBookmarks(
+  query: string
+): Promise<chrome.bookmarks.BookmarkTreeNode[]> {
+  const [hits, tree] = await Promise.all([
+    chrome.bookmarks.search(query).catch(() => []),
+    chrome.bookmarks.getTree().catch(() => []),
+  ])
+  const trashIds = collectTrashBookmarkIds(tree)
+  return hits.filter(
+    h => !trashIds.has(h.id) && !(h.parentId !== undefined && trashIds.has(h.parentId))
+  )
+}
+
 export function findBookmarkNode(
   nodes: chrome.bookmarks.BookmarkTreeNode[],
   id: string
@@ -77,6 +142,7 @@ export function collectBookmarkFolders(
       continue
     }
     if (n.url) continue
+    if (isTrashBookmarkFolder(n)) continue
     if (excludeSubtreeId && n.id === excludeSubtreeId) continue
     out.push({ id: n.id, title: n.title || 'Folder', level })
     if (n.children) {

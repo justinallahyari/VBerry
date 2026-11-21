@@ -1,6 +1,5 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
-  DEFAULT_PANEL_SHORTCUTS,
   DEFAULT_SETTINGS,
   type ActiveView,
   type RuntimeMessage,
@@ -52,20 +51,13 @@ export function applyThemeAndCss(s: Settings): void {
 }
 
 export function useChromeWindow(hooks: {
+  mode?: 'sidepanel' | 'popup'
   onCommand?: (command: string) => void
   onTabActivatedReset?: (tabId: number) => void
   onViewChanged?: () => void
 }) {
-  const urlParams = new URLSearchParams(window.location.search)
-  const isQuickSearch = urlParams.get('quicksearch') === '1'
-  const rawWinParam = urlParams.get('win')
-  const paramWinId =
-    rawWinParam !== null && rawWinParam.trim() !== '' ? Number(rawWinParam) : -1
-  const initialParamView = urlParams.get('view')
-
-  const windowId = ref<number>(
-    Number.isInteger(paramWinId) && paramWinId >= 0 ? paramWinId : -1
-  )
+  const isPopup = hooks.mode === 'popup'
+  const windowId = ref<number>(-1)
   const tabs = ref<chrome.tabs.Tab[]>([])
   const groups = ref<chrome.tabGroups.TabGroup[]>([])
   const savedPanels = ref<SavedPanel[]>([])
@@ -73,7 +65,9 @@ export function useChromeWindow(hooks: {
   const virtualGroupMap = ref<Record<number, string>>({})
   const settings = ref<Settings>({ ...DEFAULT_SETTINGS })
 
-  const activeView = ref<ActiveView>({ kind: 'ungrouped' })
+  const activeView = ref<ActiveView>(
+    isPopup && DEFAULT_SETTINGS.unifiedSearch ? { kind: 'search' } : { kind: 'ungrouped' }
+  )
   const lastTabView = ref<TabPanelView>({ kind: 'ungrouped' })
   const activeTabId = ref<number | null>(null)
 
@@ -253,7 +247,11 @@ export function useChromeWindow(hooks: {
     if (followActive) {
       const activeTab = tabs.value.find(t => t.active)
       if (activeTab && !activeTab.pinned) {
-        activeView.value = viewForTab(activeTab, winGroups)
+        const nextView = viewForTab(activeTab, winGroups)
+        lastTabView.value = nextView
+        if (!(isPopup && settings.value.unifiedSearch)) {
+          activeView.value = nextView
+        }
       }
     }
   }
@@ -283,29 +281,16 @@ export function useChromeWindow(hooks: {
     }
   }
 
-  function cyclePanel(dir: 1 | -1) {
-    const views: TabPanelView[] = [
-      { kind: 'ungrouped' },
-      ...groups.value.map(g => ({ kind: 'group' as const, groupId: g.id })),
-      ...unmaterializedSavedPanels.value.map(p => ({ kind: 'saved' as const, savedId: p.id })),
-    ]
-    const current = activeView.value
-    const curIdx = views.findIndex(v => {
-      if (v.kind === 'ungrouped') return current.kind === 'ungrouped'
-      if (v.kind === 'group') return current.kind === 'group' && v.groupId === current.groupId
-      return current.kind === 'saved' && v.savedId === current.savedId
-    })
-    const nextIdx = (curIdx + dir + views.length) % views.length
-    void selectView(views[nextIdx])
-  }
-
   async function openNewTabInActiveView(url?: string, background = false) {
     if (windowId.value < 0) windowId.value = await getTargetWindowId()
     if (windowId.value < 0) return
 
     const view = activeView.value
     const isUtility =
-      view.kind === 'bookmarks' || view.kind === 'history' || view.kind === 'snapshots'
+      view.kind === 'search' ||
+      view.kind === 'bookmarks' ||
+      view.kind === 'history' ||
+      view.kind === 'snapshots'
 
     let target: TabPanelView = isUtility ? lastTabView.value : view
     if (target.kind === 'group') {
@@ -389,9 +374,15 @@ export function useChromeWindow(hooks: {
         settings.value = {
           ...DEFAULT_SETTINGS,
           ...raw,
-          panelShortcuts: { ...DEFAULT_PANEL_SHORTCUTS, ...(raw.panelShortcuts ?? {}) },
         }
         applyThemeAndCss(settings.value)
+        if (
+          activeView.value.kind === 'search' &&
+          (!settings.value.unifiedSearch ||
+            (!isPopup && settings.value.hideUnifiedSearchInSidePanel))
+        ) {
+          activeView.value = lastTabView.value
+        }
       }
       if (changes[STORAGE_KEYS.savedPanels]) {
         const nextPanels = toArray<SavedPanel>(changes[STORAGE_KEYS.savedPanels].newValue)
@@ -425,6 +416,7 @@ export function useChromeWindow(hooks: {
     }
     scheduleRefresh()
     const isUtility =
+      activeView.value.kind === 'search' ||
       activeView.value.kind === 'bookmarks' ||
       activeView.value.kind === 'history' ||
       activeView.value.kind === 'snapshots'
@@ -438,12 +430,11 @@ export function useChromeWindow(hooks: {
   function onRuntimeMessage(msg: RuntimeMessage) {
     if (!msg || typeof msg !== 'object') return
     if (msg.type === 'vberry:close-panel') {
-      if (!isQuickSearch && msg.windowId === windowId.value) window.close()
+      if (!isPopup && msg.windowId === windowId.value) window.close()
       return
     }
     if (msg.type !== 'vberry:command') return
     if (msg.windowId !== undefined && msg.windowId !== windowId.value) return
-    void chrome.storage.session.remove(STORAGE_KEYS.pendingCommand).catch(() => {})
     hooks.onCommand?.(msg.command)
   }
 
@@ -452,7 +443,7 @@ export function useChromeWindow(hooks: {
   }
 
   function notifyPanelClosed() {
-    if (!isQuickSearch && windowId.value >= 0) {
+    if (!isPopup && windowId.value >= 0) {
       chrome.runtime
         .sendMessage({ type: 'vberry:panel-close', windowId: windowId.value })
         .catch(() => {})
@@ -469,36 +460,16 @@ export function useChromeWindow(hooks: {
     applyThemeAndCss(state.settings)
 
     await refreshChromeState(true)
-    if (isQuickSearch) {
-      const initCmd =
-        initialParamView === 'bookmarks'
-          ? 'switch_to_bookmarks'
-          : initialParamView === 'history'
-            ? 'switch_to_history'
-            : 'focus_search'
-      hooks.onCommand?.(initCmd)
+    if (isPopup) {
+      if (settings.value.unifiedSearch) {
+        activeView.value = { kind: 'search' }
+      } else if (activeView.value.kind === 'search') {
+        activeView.value = lastTabView.value
+      }
     } else if (windowId.value >= 0) {
       chrome.runtime
         .sendMessage({ type: 'vberry:panel-open', windowId: windowId.value })
         .catch(() => {})
-
-      // Replay a fresh global shortcut command if this Side Panel just opened to handle it
-      try {
-        const res = await chrome.storage.session.get(STORAGE_KEYS.pendingCommand)
-        const pending = res[STORAGE_KEYS.pendingCommand] as
-          | { command: string; windowId?: number; ts: number }
-          | undefined
-        if (
-          pending &&
-          Date.now() - pending.ts < 3000 &&
-          (pending.windowId === undefined || pending.windowId === windowId.value)
-        ) {
-          await chrome.storage.session.remove(STORAGE_KEYS.pendingCommand).catch(() => {})
-          hooks.onCommand?.(pending.command)
-        }
-      } catch {
-        // Ignore
-      }
     }
 
     chrome.tabs.onCreated.addListener(scheduleRefresh)
@@ -550,7 +521,6 @@ export function useChromeWindow(hooks: {
   })
 
   return {
-    isQuickSearch,
     windowId,
     tabs,
     groups,
@@ -568,7 +538,6 @@ export function useChromeWindow(hooks: {
     refreshChromeState,
     scheduleActiveSyncAfterRemove,
     selectView,
-    cyclePanel,
     openNewTabInActiveView,
     openUrlInSpecificTarget,
   }

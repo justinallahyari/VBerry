@@ -33,13 +33,6 @@ declare namespace chrome {
     function open(options: { windowId?: number; tabId?: number }): Promise<void>
   }
 
-  namespace action {
-    const onClicked: {
-      addListener(cb: (tab: tabs.Tab) => void): void
-      removeListener(cb: (tab: tabs.Tab) => void): void
-    }
-  }
-
   namespace tabGroups {
     type ColorEnum =
       | 'grey'
@@ -233,7 +226,6 @@ declare namespace chrome {
     }
     function getTree(): Promise<BookmarkTreeNode[]>
     function getChildren(id: string): Promise<BookmarkTreeNode[]>
-    function getRecent(numberOfItems: number): Promise<BookmarkTreeNode[]>
     function search(query: string): Promise<BookmarkTreeNode[]>
     function create(bookmark: { parentId?: string; title?: string; url?: string; index?: number }): Promise<BookmarkTreeNode>
     function move(id: string, destination: { parentId?: string; index?: number }): Promise<BookmarkTreeNode>
@@ -319,24 +311,6 @@ declare namespace chrome {
     const onInputEntered: {
       addListener(cb: (text: string, disposition: string) => void): void
     }
-  }
-
-  namespace permissions {
-    interface Permissions {
-      permissions?: string[]
-      origins?: string[]
-    }
-    function contains(permissions: Permissions): Promise<boolean>
-    function request(permissions: Permissions): Promise<boolean>
-    function remove(permissions: Permissions): Promise<boolean>
-  }
-
-  namespace scripting {
-    function executeScript<Args extends any[], Result = unknown>(injection: {
-      target: { tabId: number; allFrames?: boolean }
-      func: (...args: Args) => Result
-      args?: Args
-    }): Promise<Array<{ frameId: number; result?: Awaited<Result> }>>
   }
 }
 

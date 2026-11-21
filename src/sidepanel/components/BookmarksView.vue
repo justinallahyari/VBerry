@@ -9,6 +9,8 @@ import {
   findBookmarkNode,
   getBookmarkAncestorIds,
   isRootBookmarkFolder,
+  searchNonTrashBookmarks,
+  stripTrashFolders,
   type BookmarkDropPosition,
   type BookmarkFolderOption,
 } from '@/shared/bookmarks'
@@ -55,7 +57,7 @@ async function runSearch(q: string) {
     searchResults.value = []
     return
   }
-  const hits = await chrome.bookmarks.search(trimmed)
+  const hits = await searchNonTrashBookmarks(trimmed)
   const links = hits.filter(h => Boolean(h.url))
   searchResults.value = rankSearchItems(links, trimmed, h => ({
     title: h.title,
@@ -65,7 +67,7 @@ async function runSearch(q: string) {
 }
 
 async function load() {
-  tree.value = await chrome.bookmarks.getTree()
+  tree.value = stripTrashFolders(await chrome.bookmarks.getTree())
   if (props.query.trim()) {
     await runSearch(props.query)
   }
@@ -382,6 +384,7 @@ onUnmounted(() => {
           <span class="title">{{ item.title || item.url }}</span>
           <button
             type="button"
+            tabindex="-1"
             class="row-btn"
             title="Edit bookmark"
             @mousedown.stop
@@ -391,6 +394,7 @@ onUnmounted(() => {
           </button>
           <button
             type="button"
+            tabindex="-1"
             class="row-btn del"
             title="Delete bookmark"
             @mousedown.stop
@@ -442,6 +446,7 @@ onUnmounted(() => {
           <template v-if="!item.isRoot">
             <button
               type="button"
+              tabindex="-1"
               class="row-btn"
               :title="item.isFolder ? 'Edit / Move folder' : 'Edit bookmark'"
               @mousedown.stop
@@ -451,6 +456,7 @@ onUnmounted(() => {
             </button>
             <button
               type="button"
+              tabindex="-1"
               class="row-btn del"
               :title="item.isFolder ? 'Delete folder' : 'Delete bookmark'"
               @mousedown.stop
@@ -497,6 +503,11 @@ onUnmounted(() => {
 .tb-btn:hover {
   background: var(--bg-hover);
   border-color: var(--accent);
+}
+
+.tb-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
 }
 
 .tb-icon {

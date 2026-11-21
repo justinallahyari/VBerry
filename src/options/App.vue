@@ -2,13 +2,10 @@
 import { onMounted, ref } from 'vue'
 import {
   CHROME_GROUP_COLORS,
-  DEFAULT_PANEL_SHORTCUTS,
   DEFAULT_SETTINGS,
   type ChromeGroupColor,
-  type PanelShortcuts,
   type SavedPanel,
   type Settings,
-  type WebpageSearchMode,
 } from '@/shared/types'
 import {
   downloadTextFile,
@@ -21,7 +18,6 @@ import {
   uid,
 } from '@/shared/storage'
 import { isVivaldi } from '@/shared/env'
-import { formatKeyEvent } from '@/shared/search'
 import {
   executeImport,
   exportBackupJson,
@@ -33,77 +29,17 @@ import {
 const settings = ref<Settings>({ ...DEFAULT_SETTINGS })
 const savedPanels = ref<SavedPanel[]>([])
 const commands = ref<chrome.commands.Command[]>([])
-const recordingShortcut = ref<keyof PanelShortcuts | null>(null)
-const hasOverlayPermission = ref(false)
-const overlayPermissionError = ref('')
 const statusMsg = ref('')
 
-async function refreshOverlayPermission() {
-  try {
-    hasOverlayPermission.value = await chrome.permissions.contains({ origins: ['<all_urls>'] })
-  } catch {
-    hasOverlayPermission.value = false
-  }
-}
-
-async function selectWebpageSearchMode(mode: WebpageSearchMode) {
-  overlayPermissionError.value = ''
-  if (mode === 'overlay' && !hasOverlayPermission.value) {
-    try {
-      const granted = await chrome.permissions.request({ origins: ['<all_urls>'] })
-      hasOverlayPermission.value = granted
-      if (!granted) {
-        overlayPermissionError.value =
-          'Website access permission was not granted — keeping Floating Popup mode.'
-        return
-      }
-    } catch {
-      overlayPermissionError.value = 'Could not request website access permission in this browser.'
-      return
-    }
-  }
-  await updateSetting('webpageSearchMode', mode)
-}
-
-async function revokeOverlayPermission() {
-  try {
-    await chrome.permissions.remove({ origins: ['<all_urls>'] })
-  } catch {
-    // Ignore
-  }
-  await refreshOverlayPermission()
-  if (!hasOverlayPermission.value && settings.value.webpageSearchMode === 'overlay') {
-    await updateSetting('webpageSearchMode', 'popup')
-  }
-}
-
-const PANEL_SHORTCUT_ROWS: Array<{ key: keyof PanelShortcuts; label: string }> = [
-  { key: 'tabs', label: 'Quick Search Tabs' },
-  { key: 'bookmarks', label: 'Quick Search Bookmarks' },
-  { key: 'history', label: 'Quick Search History' },
+const HISTORY_RANGE_OPTIONS: Array<{ days: number; label: string }> = [
+  { days: 1, label: '1 day' },
+  { days: 3, label: '3 days' },
+  { days: 7, label: '7 days' },
+  { days: 30, label: '1 month' },
+  { days: 90, label: '3 months' },
+  { days: 365, label: '1 year' },
+  { days: 0, label: 'All time (not recommended)' },
 ]
-
-async function onRecordPanelShortcut(key: keyof PanelShortcuts, e: KeyboardEvent) {
-  e.preventDefault()
-  e.stopPropagation()
-  if (e.key === 'Escape') {
-    recordingShortcut.value = null
-    return
-  }
-  if (e.key === 'Backspace' || e.key === 'Delete') {
-    await updateSetting('panelShortcuts', { ...settings.value.panelShortcuts, [key]: '' })
-    recordingShortcut.value = null
-    return
-  }
-  const formatted = formatKeyEvent(e)
-  if (!formatted) return
-  await updateSetting('panelShortcuts', { ...settings.value.panelShortcuts, [key]: formatted })
-  recordingShortcut.value = null
-}
-
-async function resetPanelShortcuts() {
-  await updateSetting('panelShortcuts', { ...DEFAULT_PANEL_SHORTCUTS })
-}
 
 // Import state
 const importPreview = ref<ImportPreview | null>(null)
@@ -137,12 +73,7 @@ async function openShortcutsPage() {
 }
 
 async function load() {
-  const [s, p] = await Promise.all([
-    loadSettings(),
-    loadSavedPanels(),
-    loadCommands(),
-    refreshOverlayPermission(),
-  ])
+  const [s, p] = await Promise.all([loadSettings(), loadSavedPanels(), loadCommands()])
   settings.value = s
   savedPanels.value = p
   applyTheme(s)
@@ -524,74 +455,13 @@ onMounted(() => {
     <section class="card">
       <h2>Search Behavior</h2>
 
-      <div class="setting-row">
-        <div>
-          <div class="label">Quick Search Mode</div>
-          <div class="desc">
-            Quick Search shortcuts always open this view (whether focused on a webpage or the
-            VBerry sidebar) for a consistent experience.
-          </div>
-        </div>
-        <div class="seg-toggle" role="group" aria-label="Quick Search Mode">
-          <button
-            type="button"
-            class="seg-btn"
-            :class="{ active: settings.webpageSearchMode === 'popup' }"
-            @click="selectWebpageSearchMode('popup')"
-          >
-            Floating Popup
-          </button>
-          <button
-            type="button"
-            class="seg-btn"
-            :class="{ active: settings.webpageSearchMode === 'overlay' }"
-            @click="selectWebpageSearchMode('overlay')"
-          >
-            In-Page Spotlight Overlay
-          </button>
-        </div>
-      </div>
-
-      <div class="mode-note">
-        <p v-if="settings.webpageSearchMode === 'popup'">
-          <strong>Floating Popup:</strong> Opens a compact centered VBerry window that focuses
-          search immediately and closes on Enter, Esc, or clicking away. Works everywhere in
-          Chrome &amp; Vivaldi with no extra permissions.
-        </p>
-        <p v-else>
-          <strong>In-Page Spotlight Overlay:</strong> Renders a VBerry Quick Search modal directly
-          over the active webpage (with Tab Trees and Bookmark Trees). Automatically falls back to
-          the Floating Popup on restricted browser pages (<code>chrome://</code>,
-          <code>vivaldi://</code>, New Tab, Web Store) or if the browser blocks moving focus to the
-          page.
-        </p>
-        <p class="perm-note">
-          <strong>Additional permission required for In-Page Spotlight Overlay:</strong>
-          Injecting the overlay onto webpages requires optional website access
-          (<code>&lt;all_urls&gt;</code>).
-          <template v-if="hasOverlayPermission">
-            <span class="perm-badge granted">Granted</span>
-            <button type="button" class="btn-link" @click="revokeOverlayPermission">Revoke</button>
-          </template>
-          <template v-else>
-            <span class="perm-badge">Not granted</span>
-            <button
-              v-if="settings.webpageSearchMode === 'overlay'"
-              type="button"
-              class="btn-link"
-              @click="selectWebpageSearchMode('overlay')"
-            >
-              Grant Permission
-            </button>
-          </template>
-        </p>
-        <p v-if="overlayPermissionError" class="perm-error">{{ overlayPermissionError }}</p>
-      </div>
-
       <label class="setting-row check-row">
         <div>
-          <div class="label">Focus search when switching panels</div>
-          <div class="desc">Automatically focus the search box whenever you switch to Tabs, Bookmarks, or History.</div>
+          <div class="label">Focus search when switching panels (Quick Search popup)</div>
+          <div class="desc">
+            Automatically focus the search box when switching panels inside the frameless Quick
+            Search popup.
+          </div>
         </div>
         <input
           type="checkbox"
@@ -639,7 +509,7 @@ onMounted(() => {
       <label class="setting-row check-row">
         <div>
           <div class="label">Clear search when switching panels</div>
-          <div class="desc">Turn off to carry your search term across Tabs, Bookmarks, and History.</div>
+          <div class="desc">Turn off to carry your search term across Search, Tabs, Bookmarks, and History.</div>
         </div>
         <input
           type="checkbox"
@@ -647,6 +517,126 @@ onMounted(() => {
           @change="updateSetting('clearSearchOnPanelSwitch', ($event.target as HTMLInputElement).checked)"
         />
       </label>
+
+      <div class="setting-row">
+        <div>
+          <div class="label">History Time Range</div>
+          <div class="desc">
+            Limit History panel and Unified Search history results to recent entries (default: 7 days).
+            <span v-if="settings.historyDays === 0" class="warn-inline">
+              All time is not recommended — searching full history may be slower.
+            </span>
+          </div>
+        </div>
+        <select
+          :value="settings.historyDays"
+          @change="updateSetting('historyDays', Number(($event.target as HTMLSelectElement).value))"
+        >
+          <option v-for="opt in HISTORY_RANGE_OPTIONS" :key="opt.days" :value="opt.days">
+            {{ opt.label }}
+          </option>
+        </select>
+      </div>
+
+      <!-- Unified Search Sub-section -->
+      <div class="subsection">
+        <div class="subhead">
+          <span>Unified Search</span>
+        </div>
+
+        <label class="setting-row check-row">
+          <div>
+            <div class="label">Enable Unified Search</div>
+            <div class="desc">
+              Adds a dedicated Search panel to the left of Bookmarks and opens the frameless Quick
+              Search popup directly on it (results ordered: Tabs → Bookmarks → History).
+            </div>
+          </div>
+          <input
+            type="checkbox"
+            :checked="settings.unifiedSearch"
+            @change="updateSetting('unifiedSearch', ($event.target as HTMLInputElement).checked)"
+          />
+        </label>
+
+        <template v-if="settings.unifiedSearch">
+          <label class="setting-row check-row">
+            <div>
+              <div class="label">Hide Unified Search in Side Panel</div>
+              <div class="desc">
+                Keep the Unified Search panel inside the frameless Quick Search popup only, hiding
+                its icon from the main sidebar.
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              :checked="settings.hideUnifiedSearchInSidePanel"
+              @change="
+                updateSetting(
+                  'hideUnifiedSearchInSidePanel',
+                  ($event.target as HTMLInputElement).checked
+                )
+              "
+            />
+          </label>
+
+          <div class="nested-group">
+            <div class="nested-label">Include in Unified Search</div>
+            <label class="setting-row check-row">
+              <div class="label">Tabs</div>
+              <input
+                type="checkbox"
+                :checked="settings.unifiedSearchTabs"
+                @change="updateSetting('unifiedSearchTabs', ($event.target as HTMLInputElement).checked)"
+              />
+            </label>
+            <label class="setting-row check-row">
+              <div class="label">Bookmarks</div>
+              <input
+                type="checkbox"
+                :checked="settings.unifiedSearchBookmarks"
+                @change="updateSetting('unifiedSearchBookmarks', ($event.target as HTMLInputElement).checked)"
+              />
+            </label>
+            <label class="setting-row check-row">
+              <div class="label">History</div>
+              <input
+                type="checkbox"
+                :checked="settings.unifiedSearchHistory"
+                @change="updateSetting('unifiedSearchHistory', ($event.target as HTMLInputElement).checked)"
+              />
+            </label>
+          </div>
+
+          <div class="nested-group">
+            <div class="nested-label">Show Before Typing (Empty Search Panel)</div>
+            <label class="setting-row check-row">
+              <div class="label">Recent Tabs</div>
+              <input
+                type="checkbox"
+                :checked="settings.unifiedEmptyShowTabs"
+                @change="updateSetting('unifiedEmptyShowTabs', ($event.target as HTMLInputElement).checked)"
+              />
+            </label>
+            <label class="setting-row check-row">
+              <div class="label">Recent Bookmarks</div>
+              <input
+                type="checkbox"
+                :checked="settings.unifiedEmptyShowBookmarks"
+                @change="updateSetting('unifiedEmptyShowBookmarks', ($event.target as HTMLInputElement).checked)"
+              />
+            </label>
+            <label class="setting-row check-row">
+              <div class="label">Recent History</div>
+              <input
+                type="checkbox"
+                :checked="settings.unifiedEmptyShowHistory"
+                @change="updateSetting('unifiedEmptyShowHistory', ($event.target as HTMLInputElement).checked)"
+              />
+            </label>
+          </div>
+        </template>
+      </div>
     </section>
 
     <!-- Keyboard Shortcuts -->
@@ -655,34 +645,14 @@ onMounted(() => {
         <div>
           <h2>Keyboard Shortcuts</h2>
           <p class="hint">
-            Quick Search shortcuts always open Quick Search (Floating Popup or In-Page Spotlight
-            Overlay) rather than switching sidebar panels. Click a shortcut below and press any key
-            combo (or Backspace to clear), or use <strong>Change Global Shortcuts…</strong> to bind
-            browser-wide keys (works from any webpage, default toggle <code>Ctrl+E</code>).
+            Use <strong>Change Global Shortcuts…</strong> to bind browser-wide keys — including
+            <strong>Quick Search (Frameless Popup)</strong> and <strong>Toggle VBerry Side Panel</strong>
+            (<code>Ctrl+E</code>). Inside the frameless popup, press <code>Tab</code> to move between
+            controls, <code>↑</code>/<code>↓</code> to select results, and <code>Enter</code> to
+            open. Right-click the toolbar button to open the Side Panel.
           </p>
         </div>
         <button class="btn-primary" @click="openShortcutsPage">Change Global Shortcuts…</button>
-      </div>
-
-      <div class="subhead">
-        <span>Quick Search Shortcuts (inside VBerry &amp; Spotlight)</span>
-        <button class="btn-link" @click="resetPanelShortcuts">Reset Defaults</button>
-      </div>
-      <div v-for="row in PANEL_SHORTCUT_ROWS" :key="row.key" class="setting-row">
-        <div class="label">{{ row.label }}</div>
-        <button
-          class="kbd-btn"
-          :class="{ recording: recordingShortcut === row.key }"
-          @click="recordingShortcut = row.key"
-          @blur="recordingShortcut === row.key && (recordingShortcut = null)"
-          @keydown="recordingShortcut === row.key && onRecordPanelShortcut(row.key, $event)"
-        >
-          {{
-            recordingShortcut === row.key
-              ? 'Press keys…'
-              : settings.panelShortcuts[row.key] || 'Not set'
-          }}
-        </button>
       </div>
 
       <div class="subhead">
@@ -690,7 +660,10 @@ onMounted(() => {
       </div>
       <div v-for="cmd in commands" :key="cmd.name" class="setting-row">
         <div class="label">
-          {{ cmd.description || (cmd.name === '_execute_action' ? 'Open VBerry Side Panel' : cmd.name) }}
+          {{
+            cmd.description ||
+            (cmd.name === '_execute_action' ? 'Quick Search (Frameless Popup)' : cmd.name)
+          }}
         </div>
         <kbd class="kbd">{{ cmd.shortcut || 'Not set' }}</kbd>
       </div>
@@ -850,6 +823,35 @@ onMounted(() => {
   color: var(--text-muted);
 }
 
+.subsection {
+  margin-top: 10px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.nested-group {
+  margin: 6px 0 4px 12px;
+  padding: 6px 12px;
+  border-left: 2px solid var(--border);
+  background: var(--bg);
+  border-radius: 0 6px 6px 0;
+}
+
+.nested-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+
+.warn-inline {
+  display: block;
+  margin-top: 2px;
+  color: var(--danger);
+}
+
 .btn-link {
   border: none;
   background: transparent;
@@ -858,81 +860,6 @@ onMounted(() => {
   cursor: pointer;
   text-transform: none;
   letter-spacing: 0;
-}
-
-.seg-toggle {
-  display: inline-flex;
-  flex-shrink: 0;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  overflow: hidden;
-  background: var(--bg);
-}
-
-.seg-btn {
-  border: none;
-  background: transparent;
-  color: var(--text);
-  padding: 6px 10px;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.seg-btn + .seg-btn {
-  border-left: 1px solid var(--border);
-}
-
-.seg-btn.active {
-  background: var(--accent);
-  color: var(--accent-text);
-}
-
-.mode-note {
-  margin: 0 0 8px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  font-size: 12px;
-  color: var(--text-muted);
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.mode-note p {
-  margin: 0;
-  line-height: 1.45;
-}
-
-.perm-note {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-}
-
-.perm-badge {
-  display: inline-block;
-  padding: 1px 7px;
-  border-radius: 99px;
-  font-size: 11px;
-  font-weight: 500;
-  background: var(--bg-subtle);
-  border: 1px solid var(--border);
-  color: var(--text-muted);
-}
-
-.perm-badge.granted {
-  background: #14532d33;
-  border-color: #22c55e66;
-  color: #16a34a;
-}
-
-.perm-error {
-  color: #ef4444;
 }
 
 .hint {

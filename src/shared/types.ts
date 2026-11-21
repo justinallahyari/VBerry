@@ -40,20 +40,6 @@ export interface SavedPanel {
   sourceSideberyId?: string
 }
 
-export interface PanelShortcuts {
-  tabs: string
-  bookmarks: string
-  history: string
-}
-
-export const DEFAULT_PANEL_SHORTCUTS: PanelShortcuts = {
-  tabs: 'Alt+1',
-  bookmarks: 'Alt+2',
-  history: 'Alt+3',
-}
-
-export type WebpageSearchMode = 'popup' | 'overlay'
-
 export interface Settings {
   theme: 'auto' | 'light' | 'dark'
   density: 'compact' | 'comfortable'
@@ -62,13 +48,20 @@ export interface Settings {
   iconSize: number
   uiIconSize: number
   tabControlIconSize: number
-  panelShortcuts: PanelShortcuts
-  webpageSearchMode: WebpageSearchMode
   focusSearchOnPanelSwitch: boolean
   clearSearchOnPanelSwitch: boolean
   clearSearchOnSelect: boolean
   searchAllGroups: boolean
   autoHighlightSearchMatch: boolean
+  unifiedSearch: boolean
+  hideUnifiedSearchInSidePanel: boolean
+  unifiedSearchTabs: boolean
+  unifiedSearchBookmarks: boolean
+  unifiedSearchHistory: boolean
+  unifiedEmptyShowTabs: boolean
+  unifiedEmptyShowBookmarks: boolean
+  unifiedEmptyShowHistory: boolean
+  historyDays: number // 0 = all time
   autoCollapseInactiveGroups: boolean
   autoNestChildTabs: boolean
   showTabCounts: boolean
@@ -89,13 +82,20 @@ export const DEFAULT_SETTINGS: Settings = {
   iconSize: 16,
   uiIconSize: 19,
   tabControlIconSize: 12,
-  panelShortcuts: { ...DEFAULT_PANEL_SHORTCUTS },
-  webpageSearchMode: 'popup',
   focusSearchOnPanelSwitch: true,
   clearSearchOnPanelSwitch: false,
   clearSearchOnSelect: true,
   searchAllGroups: true,
   autoHighlightSearchMatch: true,
+  unifiedSearch: true,
+  hideUnifiedSearchInSidePanel: false,
+  unifiedSearchTabs: true,
+  unifiedSearchBookmarks: true,
+  unifiedSearchHistory: true,
+  unifiedEmptyShowTabs: false,
+  unifiedEmptyShowBookmarks: true,
+  unifiedEmptyShowHistory: false,
+  historyDays: 7,
   autoCollapseInactiveGroups: false,
   autoNestChildTabs: true,
   showTabCounts: true,
@@ -158,59 +158,15 @@ export type ActiveView =
   | { kind: 'ungrouped' }
   | { kind: 'group'; groupId: number }
   | { kind: 'saved'; savedId: string }
+  | { kind: 'search' }
   | { kind: 'bookmarks' }
   | { kind: 'history' }
   | { kind: 'snapshots' }
 
-export type SpotlightView = 'tabs' | 'bookmarks' | 'history'
-
-export interface SpotlightGroup {
-  key: string
-  title: string
-  color?: ChromeGroupColor
-  count: number
-}
-
-export interface SpotlightItem {
-  id: string
-  kind: 'tab' | 'url' | 'folder'
-  tabId?: number
-  folderId?: string
-  title: string
-  url: string
-  favIconUrl?: string
-  active?: boolean
-  discarded?: boolean
-  level?: number
-  hasChildren?: boolean
-  childCount?: number
-  folded?: boolean
-  expanded?: boolean
-  groupTitle?: string
-  groupColor?: ChromeGroupColor
-}
-
 export type RuntimeMessage =
   | { type: 'vberry:command'; command: string; windowId?: number }
-  | { type: 'vberry:open-quick-search'; view: SpotlightView; windowId: number }
   | { type: 'vberry:panel-open'; windowId: number }
   | { type: 'vberry:panel-close'; windowId: number }
   | { type: 'vberry:close-panel'; windowId: number }
   | { type: 'vberry:restore-snapshot'; snapshot: VBerrySnapshot; inNewWindow: boolean }
   | { type: 'vberry:discard-tabs'; tabIds: number[]; windowId: number }
-  | {
-      type: 'vberry:spotlight-query'
-      query: string
-      view: SpotlightView
-      windowId: number
-      groupKey?: string
-      expandedFolderIds?: string[]
-    }
-  | { type: 'vberry:spotlight-toggle-fold'; tabId: number }
-  | {
-      type: 'vberry:spotlight-activate'
-      kind: 'tab' | 'url'
-      tabId?: number
-      url?: string
-      windowId: number
-    }

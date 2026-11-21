@@ -1,18 +1,19 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import type { SavedPanel, SpotlightView, TabTreeMap, VBerrySnapshot } from '@/shared/types'
+import type { SavedPanel, TabTreeMap, VBerrySnapshot } from '@/shared/types'
 import {
   downloadTextFile,
   getChromeFaviconUrl,
   loadSavedPanels,
   loadSnapshots,
   loadVirtualGroupMap,
+  recordRecentBookmark,
   saveSavedPanels,
   saveSnapshots,
   saveTreeMeta,
 } from '@/shared/storage'
 import { createNewTab, getTargetWindowId } from '@/shared/env'
-import { matchesShortcut, rankSearchItems } from '@/shared/search'
+import { rankSearchItems } from '@/shared/search'
 import {
   buildTabTree,
   getSubtreeIds,
@@ -44,6 +45,7 @@ import {
 import { snapshotToMarkdown } from '@/shared/sidebery-import'
 import { useChromeWindow } from './composables/useChromeWindow'
 import TabTreeView from './components/TabTreeView.vue'
+import UnifiedSearchView from './components/UnifiedSearchView.vue'
 import BookmarksView from './components/BookmarksView.vue'
 import HistoryView from './components/HistoryView.vue'
 import SnapshotsView from './components/SnapshotsView.vue'
@@ -58,12 +60,12 @@ import SidePanelMenus, {
 } from './components/SidePanelMenus.vue'
 
 const searchQuery = ref('')
-const searchInputRef = ref<HTMLInputElement | null>(null)
 const searchCursor = ref<number>(-1)
 const selectedIds = ref<Set<number>>(new Set())
 const lastClickedId = ref<number | null>(null)
 const dragOverPanelKey = ref<string | null>(null)
 
+const unifiedSearchViewRef = ref<InstanceType<typeof UnifiedSearchView> | null>(null)
 const bookmarksViewRef = ref<InstanceType<typeof BookmarksView> | null>(null)
 const historyViewRef = ref<InstanceType<typeof HistoryView> | null>(null)
 const snapshotsViewRef = ref<InstanceType<typeof SnapshotsView> | null>(null)
@@ -75,22 +77,7 @@ const tabMenu = ref<TabMenuState | null>(null)
 const groupMenu = ref<GroupMenuState | null>(null)
 const itemMenu = ref<ItemMenuState | null>(null)
 
-async function focusSearchInput() {
-  await nextTick()
-  window.focus()
-  const el = searchInputRef.value
-  if (!el) return
-  el.focus()
-  el.select()
-  // Follow-up focus frame handles Chrome Side Panel / Vivaldi Web Panel activation delay
-  requestAnimationFrame(() => {
-    window.focus()
-    searchInputRef.value?.focus()
-  })
-}
-
 const {
-  isQuickSearch,
   windowId,
   tabs,
   groups,
@@ -112,26 +99,8 @@ const {
   openUrlInSpecificTarget,
 } = useChromeWindow({
   onCommand(command) {
-    if (command === 'new_tab_in_panel' && !isQuickSearch) {
+    if (command === 'new_tab_in_panel') {
       void openNewTabInActiveView()
-      return
-    }
-    if (!isQuickSearch) return
-    if (command === 'focus_search') {
-      if (
-        activeView.value.kind === 'bookmarks' ||
-        activeView.value.kind === 'history' ||
-        activeView.value.kind === 'snapshots'
-      ) {
-        void selectView({ kind: 'ungrouped' })
-      }
-      void focusSearchInput()
-    } else if (command === 'switch_to_bookmarks') {
-      void selectView({ kind: 'bookmarks' })
-      void focusSearchInput()
-    } else if (command === 'switch_to_history') {
-      void selectView({ kind: 'history' })
-      void focusSearchInput()
     }
   },
   onTabActivatedReset(tabId) {
@@ -145,9 +114,6 @@ const {
     }
     searchCursor.value =
       settings.value.autoHighlightSearchMatch && searchQuery.value.trim() ? 0 : -1
-    if (settings.value.focusSearchOnPanelSwitch) {
-      void focusSearchInput()
-    }
   },
 })
 
@@ -185,7 +151,12 @@ const visibleTabNodes = computed(() => activeTabList.value.filter(n => !n.hidden
 const highlightedTabId = computed<number | null>(() => {
   if (searchCursor.value < 0) return null
   const view = activeView.value
-  if (view.kind === 'bookmarks' || view.kind === 'history' || view.kind === 'snapshots') {
+  if (
+    view.kind === 'search' ||
+    view.kind === 'bookmarks' ||
+    view.kind === 'history' ||
+    view.kind === 'snapshots'
+  ) {
     return null
   }
   const list = visibleTabNodes.value
@@ -194,12 +165,27 @@ const highlightedTabId = computed<number | null>(() => {
   return list[idx]?.id ?? null
 })
 
+const searchPlaceholder = computed(() => {
+  const kind = activeView.value.kind
+  if (kind === 'search') {
+    const parts: string[] = []
+    if (settings.value.unifiedSearchTabs) parts.push('tabs')
+    if (settings.value.unifiedSearchBookmarks) parts.push('bookmarks')
+    if (settings.value.unifiedSearchHistory) parts.push('history')
+    return parts.length ? `Search ${parts.join(', ')}…` : 'Search…'
+  }
+  if (kind === 'bookmarks') return 'Search bookmarks…'
+  if (kind === 'history') return 'Search history…'
+  return 'Search tabs…'
+})
+
 watch(searchQuery, q => {
   searchCursor.value = settings.value.autoHighlightSearchMatch && q.trim() ? 0 : -1
 })
 
 function getSearchableCount(): number {
   const view = activeView.value
+  if (view.kind === 'search') return unifiedSearchViewRef.value?.getResultCount() ?? 0
   if (view.kind === 'bookmarks') return bookmarksViewRef.value?.getResultCount() ?? 0
   if (view.kind === 'history') return historyViewRef.value?.getResultCount() ?? 0
   if (view.kind === 'snapshots') return 0
@@ -219,17 +205,13 @@ function moveSearchCursor(delta: 1 | -1) {
   searchCursor.value = (searchCursor.value + delta + count) % count
 }
 
-async function finishQuickSearch() {
-  if (!isQuickSearch) return
-  if (windowId.value >= 0) {
-    await chrome.windows.update(windowId.value, { focused: true }).catch(() => {})
-  }
-  window.close()
-}
-
 async function openUrlFromSearchView(url: string, background: boolean) {
   await openNewTabInActiveView(url, background)
-  if (!background) await finishQuickSearch()
+}
+
+async function openBookmarkUrl(url: string, background: boolean) {
+  await recordRecentBookmark(url)
+  await openUrlFromSearchView(url, background)
 }
 
 async function activateSearchSelection() {
@@ -242,6 +224,16 @@ async function activateSearchSelection() {
       searchQuery.value = ''
       searchCursor.value = -1
     }
+  }
+
+  if (view.kind === 'search') {
+    const activated = unifiedSearchViewRef.value?.activateIndex(idx)
+    if (!activated) return
+    clearAfter()
+    if (activated.kind === 'tab') {
+      await chrome.tabs.update(activated.tabId, { active: true }).catch(() => {})
+    }
+    return
   }
 
   if (view.kind === 'bookmarks') {
@@ -259,7 +251,6 @@ async function activateSearchSelection() {
     if (node) {
       clearAfter()
       await chrome.tabs.update(node.id, { active: true }).catch(() => {})
-      await finishQuickSearch()
     }
   }
 }
@@ -281,9 +272,6 @@ function onSearchKeyDown(e: KeyboardEvent) {
       e.preventDefault()
       searchQuery.value = ''
       searchCursor.value = -1
-    } else if (isQuickSearch) {
-      e.preventDefault()
-      void finishQuickSearch()
     }
   }
 }
@@ -328,7 +316,6 @@ async function activateTab(tabId: number, e: MouseEvent) {
     searchCursor.value = -1
   }
   await chrome.tabs.update(tabId, { active: true }).catch(() => {})
-  await finishQuickSearch()
 }
 
 async function closeTab(tabId: number) {
@@ -646,13 +633,22 @@ async function itemMenuAction(action: string, target?: number | SavedPanel) {
 
   switch (action) {
     case 'open':
-      if (url) await openNewTabInActiveView(url, false)
+      if (url) {
+        if (menu.kind === 'bookmark') await recordRecentBookmark(url)
+        await openNewTabInActiveView(url, false)
+      }
       return
     case 'open-bg':
-      if (url) await openNewTabInActiveView(url, true)
+      if (url) {
+        if (menu.kind === 'bookmark') await recordRecentBookmark(url)
+        await openNewTabInActiveView(url, true)
+      }
       return
     case 'open-in-group':
-      if (url && target !== undefined) await openUrlInSpecificTarget(url, target, false)
+      if (url && target !== undefined) {
+        if (menu.kind === 'bookmark') await recordRecentBookmark(url)
+        await openUrlInSpecificTarget(url, target, false)
+      }
       return
     case 'copy-url':
       if (url) await navigator.clipboard?.writeText(url).catch(() => {})
@@ -761,6 +757,7 @@ async function itemMenuAction(action: string, target?: number | SavedPanel) {
       if (menu.kind === 'history' && menu.item.url) {
         await chrome.history.deleteUrl({ url: menu.item.url }).catch(() => {})
         await historyViewRef.value?.reload()
+        await unifiedSearchViewRef.value?.reload()
       }
       return
     case 'restore-session':
@@ -1056,79 +1053,34 @@ function openOptions() {
   void chrome.runtime.openOptionsPage()
 }
 
-const mountedAt = Date.now()
-
 function onWindowBlur() {
   closeMenus()
-  if (isQuickSearch && Date.now() - mountedAt > 250) {
-    window.close()
-  }
-}
-
-function onWindowFocus() {
-  if (isQuickSearch) void focusSearchInput()
-}
-
-function triggerQuickSearch(view: SpotlightView) {
-  if (isQuickSearch) {
-    if (view === 'bookmarks') void selectView({ kind: 'bookmarks' })
-    else if (view === 'history') void selectView({ kind: 'history' })
-    else void selectView({ kind: 'ungrouped' })
-    void focusSearchInput()
-    return
-  }
-  chrome.runtime
-    .sendMessage({ type: 'vberry:open-quick-search', view, windowId: windowId.value })
-    .catch(() => {})
 }
 
 function onKeyDown(e: KeyboardEvent) {
   if (e.key === 'Escape') {
-    const hadMenu = !!(
-      tabMenu.value ||
-      groupMenu.value ||
-      itemMenu.value ||
-      groupModal.value ||
-      bookmarkModal.value
-    )
     closeMenus()
     if (bookmarkModal.value) bookmarkModal.value = null
     if (groupModal.value) groupModal.value = null
-    if (isQuickSearch && !hadMenu && !searchQuery.value) {
-      e.preventDefault()
-      void finishQuickSearch()
-    }
-    return
   }
+}
 
-  // Quick Search shortcuts always open Quick Search (overlay or popup) for a consistent UX
-  const sc = settings.value.panelShortcuts
-  if (matchesShortcut(e, sc.tabs)) {
-    e.preventDefault()
-    triggerQuickSearch('tabs')
-  } else if (matchesShortcut(e, sc.bookmarks)) {
-    e.preventDefault()
-    triggerQuickSearch('bookmarks')
-  } else if (matchesShortcut(e, sc.history)) {
-    e.preventDefault()
-    triggerQuickSearch('history')
-  }
+function onVisibilityChange() {
+  closeMenus()
 }
 
 onMounted(() => {
   window.addEventListener('click', closeMenus)
   window.addEventListener('blur', onWindowBlur)
-  window.addEventListener('focus', onWindowFocus)
   window.addEventListener('keydown', onKeyDown)
-  document.addEventListener('visibilitychange', closeMenus)
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 onUnmounted(() => {
   window.removeEventListener('click', closeMenus)
   window.removeEventListener('blur', onWindowBlur)
-  window.removeEventListener('focus', onWindowFocus)
   window.removeEventListener('keydown', onKeyDown)
-  document.removeEventListener('visibilitychange', closeMenus)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 </script>
 
@@ -1138,6 +1090,7 @@ onUnmounted(() => {
     <header class="panel-bar">
       <div class="panel-strip">
         <button
+          type="button"
           class="panel-pill"
           :class="{
             active: activeView.kind === 'ungrouped',
@@ -1158,6 +1111,7 @@ onUnmounted(() => {
         <button
           v-for="g in groups"
           :key="g.id"
+          type="button"
           class="panel-pill"
           :class="{
             active: activeView.kind === 'group' && activeView.groupId === g.id,
@@ -1180,6 +1134,7 @@ onUnmounted(() => {
         <button
           v-for="sp in unmaterializedSavedPanels"
           :key="sp.id"
+          type="button"
           class="panel-pill"
           :class="{
             active: activeView.kind === 'saved' && activeView.savedId === sp.id,
@@ -1203,7 +1158,12 @@ onUnmounted(() => {
           </span>
         </button>
 
-        <button class="icon-btn" title="New Tab Group" @click="openCreateGroupModal">
+        <button
+          type="button"
+          class="icon-btn"
+          title="New Tab Group"
+          @click="openCreateGroupModal"
+        >
           <svg viewBox="0 0 16 16" aria-hidden="true">
             <path
               d="M8 2.75v10.5M2.75 8h10.5"
@@ -1218,7 +1178,27 @@ onUnmounted(() => {
 
       <div class="utility-strip">
         <button
+          v-if="settings.unifiedSearch && !settings.hideUnifiedSearchInSidePanel"
+          type="button"
+          class="icon-btn"
+          :class="{ active: activeView.kind === 'search' }"
+          title="Unified Search"
+          @click="selectView({ kind: 'search' })"
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <circle cx="7" cy="7" r="4.8" fill="none" stroke="currentColor" stroke-width="1.6" />
+            <path
+              d="m10.7 10.7 3.4 3.4"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+            />
+          </svg>
+        </button>
+        <button
           v-if="settings.showBookmarksPanel"
+          type="button"
           class="icon-btn"
           :class="{ active: activeView.kind === 'bookmarks' }"
           title="Bookmarks"
@@ -1236,6 +1216,7 @@ onUnmounted(() => {
         </button>
         <button
           v-if="settings.showHistoryPanel"
+          type="button"
           class="icon-btn"
           :class="{ active: activeView.kind === 'history' }"
           title="History & Recently Closed"
@@ -1255,6 +1236,7 @@ onUnmounted(() => {
         </button>
         <button
           v-if="settings.showSnapshotsPanel"
+          type="button"
           class="icon-btn"
           :class="{ active: activeView.kind === 'snapshots' }"
           title="Snapshots"
@@ -1281,7 +1263,12 @@ onUnmounted(() => {
             <circle cx="8" cy="8.5" r="2.4" fill="none" stroke="currentColor" stroke-width="1.5" />
           </svg>
         </button>
-        <button class="icon-btn" title="VBerry Settings & Sidebery Import" @click="openOptions">
+        <button
+          type="button"
+          class="icon-btn"
+          title="VBerry Settings & Sidebery Import"
+          @click="openOptions"
+        >
           <svg viewBox="0 0 16 16" aria-hidden="true">
             <path
               d="M6.7 1.4h2.6l.4 1.8a5.2 5.2 0 0 1 1.3.7l1.7-.6 1.3 2.2-1.3 1.2c.1.4.1.9 0 1.4l1.3 1.2-1.3 2.2-1.7-.6a5.2 5.2 0 0 1-1.3.7l-.4 1.8H6.7l-.4-1.8a5.2 5.2 0 0 1-1.3-.7l-1.7.6L2 9.3l1.3-1.2a4.6 4.6 0 0 1 0-1.4L2 5.5l1.3-2.2 1.7.6a5.2 5.2 0 0 1 1.3-.7Z"
@@ -1299,17 +1286,10 @@ onUnmounted(() => {
     <!-- Search Bar -->
     <div v-if="activeView.kind !== 'snapshots'" class="search-bar">
       <input
-        ref="searchInputRef"
         v-model="searchQuery"
         class="search-input"
         type="search"
-        :placeholder="
-          activeView.kind === 'bookmarks'
-            ? 'Search bookmarks…'
-            : activeView.kind === 'history'
-              ? 'Search history…'
-              : 'Search tabs…'
-        "
+        :placeholder="searchPlaceholder"
         @keydown="onSearchKeyDown"
       />
     </div>
@@ -1318,6 +1298,7 @@ onUnmounted(() => {
     <div
       v-if="
         pinnedTabs.length &&
+        activeView.kind !== 'search' &&
         activeView.kind !== 'bookmarks' &&
         activeView.kind !== 'history' &&
         activeView.kind !== 'snapshots'
@@ -1327,10 +1308,13 @@ onUnmounted(() => {
       <button
         v-for="pt in pinnedTabs"
         :key="pt.id"
+        type="button"
         class="pinned-tile"
         :class="{ active: pt.active, discarded: pt.discarded }"
         :title="pt.title || pt.url"
         @mousedown.left="pt.id !== undefined && activateTab(pt.id, $event)"
+        @keydown.enter.prevent="pt.id !== undefined && activateTab(pt.id, $event as unknown as MouseEvent)"
+        @keydown.space.prevent="pt.id !== undefined && activateTab(pt.id, $event as unknown as MouseEvent)"
         @auxclick.middle.prevent="pt.id !== undefined && closeTab(pt.id)"
         @contextmenu.prevent="openTabContextMenu(pt, $event)"
       >
@@ -1344,53 +1328,75 @@ onUnmounted(() => {
     </div>
 
     <!-- Main View -->
-    <BookmarksView
-      v-if="activeView.kind === 'bookmarks'"
-      ref="bookmarksViewRef"
-      :query="searchQuery"
-      :active-index="searchCursor"
-      :can-bookmark-active-tab="Boolean(activeTabForBookmark?.url)"
-      @open-url="(url, bg) => openUrlFromSearchView(url, bg)"
-      @context-menu="
-        (node, e) =>
-          openItemContextMenu({ kind: 'bookmark', node, fromSearch: Boolean(searchQuery.trim()) }, e)
-      "
-      @panel-context-menu="e => openItemContextMenu({ kind: 'bookmark-panel' }, e)"
-      @add-bookmark="parentId => openAddBookmarkModal(parentId)"
-      @add-folder="parentId => openAddFolderModal(parentId)"
-      @bookmark-active-tab="parentId => bookmarkActiveTabInFolder(parentId)"
-      @edit-bookmark="node => openEditBookmarkModal(node)"
-    />
-    <HistoryView
-      v-else-if="activeView.kind === 'history'"
-      ref="historyViewRef"
-      :query="searchQuery"
-      :active-index="searchCursor"
-      @open-url="(url, bg) => openUrlFromSearchView(url, bg)"
-      @context-menu="(item, e) => openItemContextMenu({ kind: 'history', item }, e)"
-      @session-context-menu="(session, e) => openItemContextMenu({ kind: 'session', session }, e)"
-    />
-    <SnapshotsView
-      v-else-if="activeView.kind === 'snapshots'"
-      ref="snapshotsViewRef"
-      @context-menu="(target, e) => openItemContextMenu(target, e)"
-    />
-    <TabTreeView
-      v-else
-      :nodes="activeTabList"
-      :selected-ids="selectedIds"
-      :highlighted-id="highlightedTabId"
-      :group-title="activeGroupTitle"
-      :is-saved-empty="activeView.kind === 'saved' && activeTabList.length === 0"
-      @activate="activateTab"
-      @close="closeTab"
-      @toggle-fold="handleToggleFold"
-      @toggle-mute="handleToggleMute"
-      @new-tab="openNewTabInActiveView()"
-      @context-menu="openTabContextMenu"
-      @panel-context-menu="openActivePanelContextMenu"
-      @drop-tab="handleDropTab"
-    />
+    <div class="view-body">
+      <UnifiedSearchView
+        v-if="activeView.kind === 'search'"
+        ref="unifiedSearchViewRef"
+        :query="searchQuery"
+        :active-index="searchCursor"
+        :tabs="tabs"
+        :groups="groups"
+        :saved-panels="savedPanels"
+        :virtual-group-map="virtualGroupMap"
+        :settings="settings"
+        @activate-tab="activateTab"
+        @open-bookmark-url="(url, bg) => openBookmarkUrl(url, bg)"
+        @open-history-url="(url, bg) => openUrlFromSearchView(url, bg)"
+        @tab-context-menu="openTabContextMenu"
+        @bookmark-context-menu="
+          (node, e) => openItemContextMenu({ kind: 'bookmark', node, fromSearch: false }, e)
+        "
+        @history-context-menu="(item, e) => openItemContextMenu({ kind: 'history', item }, e)"
+      />
+      <BookmarksView
+        v-else-if="activeView.kind === 'bookmarks'"
+        ref="bookmarksViewRef"
+        :query="searchQuery"
+        :active-index="searchCursor"
+        :can-bookmark-active-tab="Boolean(activeTabForBookmark?.url)"
+        @open-url="(url, bg) => openBookmarkUrl(url, bg)"
+        @context-menu="
+          (node, e) =>
+            openItemContextMenu({ kind: 'bookmark', node, fromSearch: Boolean(searchQuery.trim()) }, e)
+        "
+        @panel-context-menu="e => openItemContextMenu({ kind: 'bookmark-panel' }, e)"
+        @add-bookmark="parentId => openAddBookmarkModal(parentId)"
+        @add-folder="parentId => openAddFolderModal(parentId)"
+        @bookmark-active-tab="parentId => bookmarkActiveTabInFolder(parentId)"
+        @edit-bookmark="node => openEditBookmarkModal(node)"
+      />
+      <HistoryView
+        v-else-if="activeView.kind === 'history'"
+        ref="historyViewRef"
+        :query="searchQuery"
+        :active-index="searchCursor"
+        :history-days="settings.historyDays"
+        @open-url="(url, bg) => openUrlFromSearchView(url, bg)"
+        @context-menu="(item, e) => openItemContextMenu({ kind: 'history', item }, e)"
+        @session-context-menu="(session, e) => openItemContextMenu({ kind: 'session', session }, e)"
+      />
+      <SnapshotsView
+        v-else-if="activeView.kind === 'snapshots'"
+        ref="snapshotsViewRef"
+        @context-menu="(target, e) => openItemContextMenu(target, e)"
+      />
+      <TabTreeView
+        v-else
+        :nodes="activeTabList"
+        :selected-ids="selectedIds"
+        :highlighted-id="highlightedTabId"
+        :group-title="activeGroupTitle"
+        :is-saved-empty="activeView.kind === 'saved' && activeTabList.length === 0"
+        @activate="activateTab"
+        @close="closeTab"
+        @toggle-fold="handleToggleFold"
+        @toggle-mute="handleToggleMute"
+        @new-tab="openNewTabInActiveView()"
+        @context-menu="openTabContextMenu"
+        @panel-context-menu="openActivePanelContextMenu"
+        @drop-tab="handleDropTab"
+      />
+    </div>
 
     <GroupModal
       :modal="groupModal"
@@ -1545,6 +1551,13 @@ onUnmounted(() => {
   color: var(--text);
 }
 
+.panel-pill:focus-visible,
+.icon-btn:focus-visible,
+.pinned-tile:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .search-bar {
   padding: 6px 8px;
   border-bottom: 1px solid var(--border);
@@ -1563,6 +1576,7 @@ onUnmounted(() => {
 
 .search-input:focus {
   border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
   background: var(--bg);
 }
 
@@ -1572,6 +1586,13 @@ onUnmounted(() => {
   gap: 4px;
   padding: 6px 8px;
   border-bottom: 1px solid var(--border);
+}
+
+.view-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .pinned-tile {

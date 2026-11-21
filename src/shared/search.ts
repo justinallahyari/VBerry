@@ -1,3 +1,14 @@
+const MS_PER_DAY = 86_400_000
+
+/**
+ * Compute the `startTime` epoch (ms) for `chrome.history.search` given a lookback in days.
+ * `0` (or negative) means all time (`startTime = 0`).
+ */
+export function historyStartTime(historyDays: number, now = Date.now()): number {
+  if (!Number.isFinite(historyDays) || historyDays <= 0) return 0
+  return Math.max(0, now - historyDays * MS_PER_DAY)
+}
+
 /**
  * Score how well a candidate (title + url) matches a user search query.
  * Higher score = more likely match. Returns 0 if not all query tokens match.
@@ -64,42 +75,4 @@ export function rankSearchItems<T>(
 
   scored.sort((a, b) => b.score - a.score || b.tie - a.tie || a.idx - b.idx)
   return scored.map(s => s.item)
-}
-
-/**
- * Format a KeyboardEvent into a normalized shortcut string like `Alt+1` or `Ctrl+Shift+B`.
- * Returns null if only a modifier key was pressed.
- */
-export function formatKeyEvent(e: KeyboardEvent): string | null {
-  const ignored = new Set(['Control', 'Shift', 'Alt', 'Meta', 'OS'])
-  if (ignored.has(e.key)) return null
-
-  const parts: string[] = []
-  if (e.ctrlKey) parts.push('Ctrl')
-  if (e.metaKey) parts.push('Meta')
-  if (e.altKey) parts.push('Alt')
-  if (e.shiftKey) parts.push('Shift')
-
-  // Use physical digit/letter code when Alt is held on macOS (e.g. Alt+1 produces `¡` in e.key)
-  let keyName = e.key
-  if (/^Digit[0-9]$/.test(e.code)) {
-    keyName = e.code.slice(5)
-  } else if (/^Key[A-Z]$/.test(e.code)) {
-    keyName = e.code.slice(3)
-  } else if (keyName.length === 1) {
-    keyName = keyName.toUpperCase()
-  }
-
-  parts.push(keyName)
-  return parts.join('+')
-}
-
-/**
- * Check if a KeyboardEvent matches a configured shortcut string (case-insensitive).
- */
-export function matchesShortcut(e: KeyboardEvent, shortcut?: string): boolean {
-  const target = (shortcut ?? '').trim().toLowerCase()
-  if (!target) return false
-  const formatted = formatKeyEvent(e)
-  return formatted !== null && formatted.toLowerCase() === target
 }

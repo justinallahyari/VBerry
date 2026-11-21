@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { nextTick, onMounted, ref, watch } from 'vue'
 import { getChromeFaviconUrl } from '@/shared/storage'
-import { rankSearchItems } from '@/shared/search'
+import { historyStartTime, rankSearchItems } from '@/shared/search'
 
 const props = defineProps<{
   query: string
   activeIndex?: number
+  historyDays: number
 }>()
 
 const emit = defineEmits<{
@@ -20,9 +21,10 @@ const historyItems = ref<chrome.history.HistoryItem[]>([])
 
 async function load() {
   const q = props.query.trim()
+  const startTime = historyStartTime(props.historyDays)
   const [sessions, hist] = await Promise.all([
     chrome.sessions.getRecentlyClosed({ maxResults: 10 }).catch(() => []),
-    chrome.history.search({ text: q, maxResults: 80 }),
+    chrome.history.search({ text: q, maxResults: 80, startTime }),
   ])
   recentlyClosed.value = sessions
   historyItems.value = q
@@ -70,7 +72,7 @@ function formatTime(ms?: number): string {
   return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
-watch(() => props.query, load)
+watch(() => [props.query, props.historyDays], load)
 onMounted(load)
 </script>
 

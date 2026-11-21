@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { formatKeyEvent, matchesShortcut, rankSearchItems, scoreSearchMatch } from './search'
+import { historyStartTime, rankSearchItems, scoreSearchMatch } from './search'
 
-describe('Search Ranking & Panel Shortcuts', () => {
+describe('Search Ranking & History Range', () => {
   it('ranks exact / prefix / domain matches above loose URL matches', () => {
     const items = [
       { id: 1, title: 'Random article', url: 'https://blog.example.com/about-github-actions' },
@@ -17,18 +17,10 @@ describe('Search Ranking & Panel Shortcuts', () => {
     expect(scoreSearchMatch('git nope', 'GitHub Pull Requests', 'https://github.com/pulls')).toBe(0)
   })
 
-  it('formats and matches Alt+1 shortcuts cleanly even on macOS Alt symbol keys', () => {
-    const macAlt1 = {
-      key: '¡',
-      code: 'Digit1',
-      altKey: true,
-      ctrlKey: false,
-      metaKey: false,
-      shiftKey: false,
-    } as KeyboardEvent
-
-    expect(formatKeyEvent(macAlt1)).toBe('Alt+1')
-    expect(matchesShortcut(macAlt1, 'Alt+1')).toBe(true)
-    expect(matchesShortcut(macAlt1, 'Alt+2')).toBe(false)
+  it('computes history startTime from days (0 = all time)', () => {
+    const now = 1_700_000_000_000
+    expect(historyStartTime(0, now)).toBe(0)
+    expect(historyStartTime(7, now)).toBe(now - 7 * 86_400_000)
+    expect(historyStartTime(1, now)).toBe(now - 86_400_000)
   })
 })

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "VBerry",
-  "version": "6.4.1",
+  "version": "6.5.0",
   "description": "Chrome-native vertical tab trees, Tab Group panels, bookmarks, history, snapshots, and Sidebery import.",
   "incognito": "split",
   "icons": {
@@ -11,7 +11,8 @@
     "128": "icons/icon-128.png"
   },
   "action": {
-    "default_title": "Toggle VBerry Side Panel",
+    "default_title": "VBerry Quick Search",
+    "default_popup": "popup/index.html",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png",
@@ -40,28 +41,21 @@
     "sessions",
     "favicon",
     "alarms",
-    "contextMenus",
-    "scripting"
-  ],
-  "optional_host_permissions": [
-    "<all_urls>"
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["_favicon/*"],
-      "matches": ["<all_urls>"]
-    }
+    "contextMenus"
   ],
   "omnibox": {
     "keyword": "="
   },
   "commands": {
     "_execute_action": {
+      "description": "Quick Search (Frameless Popup)"
+    },
+    "toggle_side_panel": {
       "suggested_key": {
         "default": "Ctrl+E",
         "mac": "MacCtrl+E"
       },
-      "description": "Open VBerry Side Panel"
+      "description": "Toggle VBerry Side Panel"
     },
     "new_tab_in_panel": {
       "suggested_key": {
@@ -69,15 +63,6 @@
         "mac": "MacCtrl+Space"
       },
       "description": "Open new tab in active group"
-    },
-    "focus_search": {
-      "description": "Quick Search Tabs"
-    },
-    "switch_to_bookmarks": {
-      "description": "Quick Search Bookmarks"
-    },
-    "switch_to_history": {
-      "description": "Quick Search History"
     },
     "create_snapshot": {
       "description": "Create tab snapshot"

@@ -1,5 +1,4 @@
 import {
-  DEFAULT_PANEL_SHORTCUTS,
   DEFAULT_SETTINGS,
   type SavedPanel,
   type Settings,
@@ -15,7 +14,7 @@ export const STORAGE_KEYS = {
   virtualGroups: 'vberry_virtual_groups',
   lastSession: 'vberry_last_session',
   sessionRestored: 'vberry_session_restored',
-  pendingCommand: 'vberry_pending_command',
+  recentBookmarks: 'vberry_recent_bookmarks',
 } as const
 
 /**
@@ -41,10 +40,6 @@ function normalizeSettings(raw: unknown): Settings {
   return {
     ...DEFAULT_SETTINGS,
     ...obj,
-    panelShortcuts: {
-      ...DEFAULT_PANEL_SHORTCUTS,
-      ...(obj.panelShortcuts ?? {}),
-    },
   }
 }
 
@@ -76,6 +71,27 @@ export async function loadSnapshots(): Promise<VBerrySnapshot[]> {
 
 export async function saveSnapshots(snapshots: VBerrySnapshot[]): Promise<void> {
   await chrome.storage.local.set({ [STORAGE_KEYS.snapshots]: toPlain(Array.from(snapshots)) })
+}
+
+export async function loadRecentBookmarkUrls(): Promise<string[]> {
+  try {
+    const res = await chrome.storage.local.get(STORAGE_KEYS.recentBookmarks)
+    const raw = res[STORAGE_KEYS.recentBookmarks]
+    return Array.isArray(raw) ? raw.filter((u): u is string => typeof u === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+export async function recordRecentBookmark(url: string): Promise<void> {
+  if (!url) return
+  try {
+    const prev = await loadRecentBookmarkUrls()
+    const next = [url, ...prev.filter(u => u !== url)].slice(0, 50)
+    await chrome.storage.local.set({ [STORAGE_KEYS.recentBookmarks]: next })
+  } catch {
+    // Ignore storage errors
+  }
 }
 
 let sessionLockChain: Promise<unknown> = Promise.resolve()

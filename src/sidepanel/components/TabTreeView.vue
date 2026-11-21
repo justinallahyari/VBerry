@@ -142,6 +142,8 @@ function onAuxClick(e: MouseEvent, tabId: number) {
 
           <button
             v-if="node.hasChildren"
+            type="button"
+            tabindex="-1"
             class="fold-btn"
             :title="node.folded ? 'Expand branch' : 'Fold branch'"
             @mousedown.stop
@@ -173,6 +175,8 @@ function onAuxClick(e: MouseEvent, tabId: number) {
 
         <button
           v-if="node.tab.audible || node.tab.mutedInfo?.muted"
+          type="button"
+          tabindex="-1"
           class="icon-action"
           :title="node.tab.mutedInfo?.muted ? 'Unmute tab' : 'Mute tab'"
           @mousedown.stop
@@ -182,6 +186,8 @@ function onAuxClick(e: MouseEvent, tabId: number) {
         </button>
 
         <button
+          type="button"
+          tabindex="-1"
           class="close-btn"
           title="Close tab"
           @mousedown.stop
@@ -431,6 +437,13 @@ function onAuxClick(e: MouseEvent, tabId: number) {
 .new-tab-row:hover {
   background: var(--bg-hover);
   color: var(--text);
+}
+
+.new-tab-row:focus-visible,
+.primary-btn:focus-visible,
+.secondary-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .empty-state {

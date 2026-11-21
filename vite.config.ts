@@ -21,6 +21,7 @@ export default defineConfig({
       input: {
         sidepanel: resolve(import.meta.dirname, 'sidepanel.html'),
         options: resolve(import.meta.dirname, 'options.html'),
+        welcome: resolve(import.meta.dirname, 'welcome.html'),
         background: resolve(import.meta.dirname, 'src/background/index.ts'),
       },
       output: {
