@@ -8,7 +8,7 @@ import {
 } from './storage'
 import { buildTabTree } from './tree'
 
-export interface PersistedTabRecord {
+interface PersistedTabRecord {
   url: string
   pinned?: boolean
   level: number
@@ -16,7 +16,7 @@ export interface PersistedTabRecord {
   virtualGroupId?: string
 }
 
-export interface PersistedWindowState {
+interface PersistedWindowState {
   tabs: PersistedTabRecord[]
 }
 

@@ -103,7 +103,7 @@ export function resetVivaldiDetectionCache(): void {
   cachedIsVivaldi = false
 }
 
-export async function getDefaultNewTabUrl(): Promise<string | undefined> {
+async function getDefaultNewTabUrl(): Promise<string | undefined> {
   return (await isVivaldi()) ? VIVALDI_STARTPAGE_URL : undefined
 }
 

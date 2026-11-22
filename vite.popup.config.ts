@@ -18,7 +18,7 @@ export default defineConfig({
     outDir: 'addon/popup',
     emptyOutDir: false,
     target: 'chrome120',
-    minify: 'esbuild',
+    minify: 'oxc',
     sourcemap: false,
     cssCodeSplit: false,
     lib: {

@@ -15,7 +15,7 @@ export default defineConfig({
     outDir: 'addon',
     emptyOutDir: true,
     target: 'chrome120',
-    minify: 'esbuild',
+    minify: 'oxc',
     sourcemap: false,
     rollupOptions: {
       input: {

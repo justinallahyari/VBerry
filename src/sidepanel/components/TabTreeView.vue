@@ -8,7 +8,6 @@ const props = defineProps<{
   selectedIds: Set<number>
   highlightedId?: number | null
   groupTitle: string
-  groupColor?: string
   isSavedEmpty?: boolean
 }>()
 

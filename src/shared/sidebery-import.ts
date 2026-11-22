@@ -26,7 +26,7 @@ const SIDEBERY_PANEL_HISTORY = 4
 // Sidebery SnapStoreMode.Unchanged = 0
 const SNAP_UNCHANGED = 0
 
-export interface SideberyPanelRaw {
+interface SideberyPanelRaw {
   id: string
   type?: number | string
   name?: string
@@ -39,7 +39,7 @@ export interface SideberyPanelRaw {
   }>
 }
 
-export interface SideberySnapTabRaw {
+interface SideberySnapTabRaw {
   url: string
   title?: string
   panelId?: string
@@ -50,7 +50,7 @@ export interface SideberySnapTabRaw {
   originalUrl?: string
 }
 
-export interface SideberySnapshotRaw {
+interface SideberySnapshotRaw {
   id: string
   time: number
   containers?: Record<string, unknown> | unknown[] | 0
@@ -86,7 +86,7 @@ export interface ImportPreview {
   parsed: SideberyBackupRaw
 }
 
-export interface ImportOptions {
+interface ImportOptions {
   importPanels?: boolean
   importSnapshots?: boolean
   importSettings?: boolean
@@ -282,7 +282,7 @@ export function normalizeSideberySnapshots(rawSnapshots: SideberySnapshotRaw[]):
 /**
  * Extract VBerry SavedPanels from a Sidebery sidebar config.
  */
-export function extractSideberyPanels(
+function extractSideberyPanels(
   sidebar?: SideberyBackupRaw['sidebar']
 ): SavedPanel[] {
   if (!sidebar?.panels) return []
@@ -321,7 +321,7 @@ export function extractSideberyPanels(
 /**
  * Map relevant Firefox Sidebery settings to VBerry's Chrome-native Settings.
  */
-export function mapSideberySettings(raw?: Record<string, unknown>): Partial<Settings> {
+function mapSideberySettings(raw?: Record<string, unknown>): Partial<Settings> {
   if (!raw) return {}
   const out: Partial<Settings> = {}
 
@@ -540,7 +540,7 @@ export async function exportBackupJson(): Promise<{ filename: string; json: stri
   ])
 
   const payload = {
-    vberryVersion: '6.5.0',
+    vberryVersion: '6.5.1',
     exportedAt: Date.now(),
     settings: { ...DEFAULT_SETTINGS, ...settings },
     savedPanels,

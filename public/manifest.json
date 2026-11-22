@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "VBerry",
-  "version": "6.5.0",
-  "description": "Chrome-native vertical tab trees, Tab Group panels, bookmarks, history, snapshots, and Sidebery import.",
+  "version": "6.5.1",
+  "description": "Vertical tab trees, Tab Groups, instant Quick Search across tabs, bookmarks, and history, plus tab snapshots.",
   "incognito": "split",
   "icons": {
     "16": "icons/icon-16.png",
@@ -48,7 +48,7 @@
   },
   "commands": {
     "_execute_action": {
-      "description": "Quick Search (Frameless Popup)"
+      "description": "Open Quick Search"
     },
     "toggle_side_panel": {
       "suggested_key": {

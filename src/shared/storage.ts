@@ -101,7 +101,7 @@ let sessionLockChain: Promise<unknown> = Promise.resolve()
  * Chrome events (bulk discard onReplaced, bulk close onRemoved, bulk onCreated)
  * can never read stale state and overwrite each other.
  */
-export function withSessionLock<T>(fn: () => Promise<T>): Promise<T> {
+function withSessionLock<T>(fn: () => Promise<T>): Promise<T> {
   const next = sessionLockChain.then(fn, fn)
   sessionLockChain = next.catch(() => {})
   return next

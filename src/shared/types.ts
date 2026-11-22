@@ -108,7 +108,7 @@ export const DEFAULT_SETTINGS: Settings = {
   customCss: '',
 }
 
-export interface TabTreeEntry {
+interface TabTreeEntry {
   parentId?: number
   folded?: boolean
 }

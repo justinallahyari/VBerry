@@ -22,12 +22,12 @@ import {
 } from '@/shared/groups'
 import { restorePersistedSessionIfNeeded } from '@/shared/session-state'
 
-export type TabPanelView =
+type TabPanelView =
   | { kind: 'ungrouped' }
   | { kind: 'group'; groupId: number }
   | { kind: 'saved'; savedId: string }
 
-export function applyThemeAndCss(s: Settings): void {
+function applyThemeAndCss(s: Settings): void {
   const root = document.documentElement
   if (s.theme === 'auto') root.removeAttribute('data-theme')
   else root.setAttribute('data-theme', s.theme)

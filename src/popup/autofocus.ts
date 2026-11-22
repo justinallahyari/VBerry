@@ -1,128 +1,160 @@
-import type { Directive } from 'vue'
+import type { ObjectDirective } from 'vue'
 
 interface AutofocusCleanup {
   stop: () => void
 }
 
 const cleanupMap = new WeakMap<HTMLElement, AutofocusCleanup>()
+const EXPIRE_MS = 1000
 
 /**
- * Popup auto-focus directive optimized for both Chrome and Vivaldi:
- * - On Chrome (`document.hasFocus() === true` at mount): focuses immediately at 0ms.
- * - On Vivaldi (`document.hasFocus() === false` at mount): runs the benchmarked L6 winner
- *   (`window.load` -> `history.pushState` -> `window.focus()` -> `el.focus()`), floored at
- *   ~22ms from navigationStart so ultra-fast loads don't fire before Vivaldi attaches the
- *   popup host. Watches `document.hasFocus()` on rAF to latch immediately (even if Vivaldi
- *   skips a DOM `focus` event) and only triggers a single safety retry at +210ms if needed.
+ * Popup auto-focus directive for Chrome and Vivaldi:
+ * - Focuses the input immediately on mount.
+ * - After load, uses a `MessageChannel` turn (unthrottled while hidden) to trigger
+ *   `history.replaceState(history.state, '', location.href)` so Vivaldi runs its
+ *   same-document navigation focus handoff without altering URL or history length.
+ * - Listens for `window` `focus`, `visibilitychange`, and `requestAnimationFrame`
+ *   for up to 1s, allowing one recovery attempt after the popup becomes visible,
+ *   and cancels on success, typing, clicks, popup closure (`pagehide`), or unmount.
  */
-export const vAutofocus: Directive<HTMLElement, boolean | undefined> = {
+export const vAutofocus: ObjectDirective<HTMLElement, boolean | undefined> = {
   mounted(el, binding) {
     if (binding.value === false) return
 
-    let settled = false
-    let interacted = false
-    let triggerTimer: ReturnType<typeof setTimeout> | null = null
-    let fallbackTimer: ReturnType<typeof setTimeout> | null = null
-    let watchRaf: number | null = null
+    let stopped = false
+    let handoffStarted = false
+    let recoveredAfterVisible = false
+    let channel: MessageChannel | null = null
+    let rafId: number | null = null
+    let expireTimer: ReturnType<typeof setTimeout> | null = null
 
-    const clearPending = () => {
-      if (triggerTimer !== null) {
-        clearTimeout(triggerTimer)
-        triggerTimer = null
-      }
-      if (fallbackTimer !== null) {
-        clearTimeout(fallbackTimer)
-        fallbackTimer = null
-      }
-      if (watchRaf !== null) {
-        cancelAnimationFrame(watchRaf)
-        watchRaf = null
-      }
+    const closeChannel = () => {
+      if (!channel) return
+      channel.port1.onmessage = null
+      channel.port1.close()
+      channel.port2.close()
+      channel = null
     }
 
-    const checkSettled = () => {
-      if (document.activeElement === el && document.hasFocus()) {
-        settled = true
-        clearPending()
+    const isSettled = () => document.activeElement === el && document.hasFocus()
+
+    const stop = () => {
+      if (stopped) return
+      stopped = true
+      closeChannel()
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId)
+        rafId = null
+      }
+      if (expireTimer !== null) {
+        clearTimeout(expireTimer)
+        expireTimer = null
+      }
+      window.removeEventListener('load', onLoad)
+      window.removeEventListener('focus', onWindowFocus)
+      window.removeEventListener('pointerdown', onUserInteract, true)
+      window.removeEventListener('keydown', onUserInteract, true)
+      window.removeEventListener('pagehide', stop)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
+
+    const focusInput = (): boolean => {
+      if (stopped) return false
+      if (document.activeElement !== el) {
+        el.focus({ preventScroll: true })
+      }
+      if (isSettled()) {
+        stop()
         return true
       }
       return false
     }
 
-    const startWatch = () => {
-      if (settled || interacted || watchRaf !== null) return
+    const triggerHandoff = () => {
+      history.replaceState(history.state, '', location.href)
+      focusInput()
+    }
+
+    const scheduleRafWatch = () => {
+      if (stopped || rafId !== null) return
       const tick = () => {
-        watchRaf = null
-        if (settled || interacted) return
-        if (document.hasFocus() && document.activeElement !== el) {
-          el.focus({ preventScroll: true })
+        rafId = null
+        if (stopped) return
+        if (focusInput()) return
+        if (document.visibilityState === 'visible' && handoffStarted && !recoveredAfterVisible) {
+          recoveredAfterVisible = true
+          triggerHandoff()
+          if (stopped) return
         }
-        if (!checkSettled()) {
-          watchRaf = requestAnimationFrame(tick)
-        }
+        rafId = requestAnimationFrame(tick)
       }
-      watchRaf = requestAnimationFrame(tick)
-    }
-
-    const runPushStateFocus = (hash: string) => {
-      if (settled || interacted || checkSettled()) return
-      history.pushState(null, '', hash)
-      window.focus()
-      el.focus({ preventScroll: true })
-      checkSettled()
-    }
-
-    const onInteract = () => {
-      interacted = true
-      clearPending()
+      rafId = requestAnimationFrame(tick)
     }
 
     const onWindowFocus = () => {
-      if (settled || interacted) return
-      if (document.activeElement !== el) el.focus({ preventScroll: true })
-      checkSettled()
+      if (stopped) return
+      focusInput()
     }
 
-    const scheduleAfterLoad = () => {
-      if (settled || interacted || checkSettled()) return
-      // Match L6's winning ~22ms post-load floor so fast loads never fire before Vivaldi attaches
-      const waitMs = Math.max(0, Math.ceil(22 - performance.now()))
-      triggerTimer = setTimeout(() => {
-        triggerTimer = null
-        runPushStateFocus('#/search')
-        if (!settled && !interacted) {
-          startWatch()
-          // Safety retry only past L6's ~176ms window so it never resets a normal handoff
-          fallbackTimer = setTimeout(() => {
-            fallbackTimer = null
-            runPushStateFocus('#/ready')
-          }, 210)
+    const onVisibilityChange = () => {
+      if (stopped || document.visibilityState !== 'visible') return
+      if (focusInput()) return
+      if (handoffStarted && !recoveredAfterVisible) {
+        recoveredAfterVisible = true
+        triggerHandoff()
+      }
+    }
+
+    const onUserInteract = () => {
+      stop()
+    }
+
+    const runChannelHandoff = () => {
+      if (stopped) return
+      const complete = () => {
+        closeChannel()
+        focusInput()
+        if (stopped) return
+
+        handoffStarted = true
+        history.replaceState(history.state, '', location.href)
+        focusInput()
+        if (!stopped) {
+          scheduleRafWatch()
         }
-      }, waitMs)
+      }
+
+      if (typeof MessageChannel !== 'undefined') {
+        channel = new MessageChannel()
+        channel.port1.onmessage = complete
+        channel.port2.postMessage(null)
+      } else {
+        queueMicrotask(complete)
+      }
     }
 
-    window.addEventListener('pointerdown', onInteract, true)
-    window.addEventListener('keydown', onInteract, true)
+    const onLoad = () => {
+      if (stopped) return
+      if (focusInput()) return
+      runChannelHandoff()
+    }
+
+    window.addEventListener('pointerdown', onUserInteract, true)
+    window.addEventListener('keydown', onUserInteract, true)
     window.addEventListener('focus', onWindowFocus)
+    window.addEventListener('pagehide', stop)
+    document.addEventListener('visibilitychange', onVisibilityChange)
 
-    if (document.hasFocus()) {
-      el.focus({ preventScroll: true })
-      checkSettled()
-    } else if (document.readyState === 'complete') {
-      scheduleAfterLoad()
+    expireTimer = setTimeout(stop, EXPIRE_MS)
+    cleanupMap.set(el, { stop })
+
+    if (focusInput()) return
+
+    if (document.readyState === 'complete') {
+      onLoad()
     } else {
-      window.addEventListener('load', scheduleAfterLoad, { once: true })
+      window.addEventListener('load', onLoad, { once: true })
     }
-
-    cleanupMap.set(el, {
-      stop() {
-        clearPending()
-        window.removeEventListener('load', scheduleAfterLoad)
-        window.removeEventListener('pointerdown', onInteract, true)
-        window.removeEventListener('keydown', onInteract, true)
-        window.removeEventListener('focus', onWindowFocus)
-      },
-    })
   },
 
   unmounted(el) {

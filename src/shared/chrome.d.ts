@@ -44,7 +44,6 @@ declare namespace chrome {
       | 'purple'
       | 'cyan'
       | 'orange'
-    const TAB_GROUP_ID_NONE: -1
     interface TabGroup {
       id: number
       windowId: number
@@ -66,7 +65,6 @@ declare namespace chrome {
   }
 
   namespace tabs {
-    const TAB_ID_NONE: -1
     interface Tab {
       id?: number
       index: number
@@ -203,7 +201,6 @@ declare namespace chrome {
     }
     const local: StorageArea
     const session: StorageArea
-    const sync: StorageArea
     interface StorageChange {
       oldValue?: any
       newValue?: any
