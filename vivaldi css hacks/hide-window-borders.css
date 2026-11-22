@@ -19,10 +19,15 @@
   padding-left: 0 !important;
 }
 
-#webpage-stack,
-#browser.ui-rounded #webpage-stack {
+#browser:not(.fullscreen) #panels-container.left:not(.icons, .overlay.minimized) + #webview-container #webpage-stack,
+#browser.ui-rounded:not(.fullscreen) #panels-container.left:not(.icons, .overlay.minimized) + #webview-container #webpage-stack {
   margin-left: 3px !important;
   padding-left: 0 !important;
+}
+
+#browser.fullscreen #webpage-stack,
+#browser.fullscreen.ui-rounded #webpage-stack {
+  margin-left: 0 !important;
 }
 
 #webview-container,
