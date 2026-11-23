@@ -30,35 +30,76 @@ import {
 const AUTO_SNAPSHOT_ALARM = 'vberry_auto_snapshot'
 const MENU_ROOT_ID = 'vberry_send_to_group'
 const MENU_OPEN_SIDEPANEL_ID = 'vberry_action_open_sidepanel'
-const openSidePanelWindows = new Set<number>()
+const SIDEPANEL_PORT_PREFIX = 'vberry-sidepanel:'
+const openSidePanelPorts = new Map<number, chrome.runtime.Port>()
 let lastFocusedWindowId = -1
+let focusSeq = 0
+
+chrome.runtime.onConnect?.addListener(port => {
+  if (!port.name.startsWith(SIDEPANEL_PORT_PREFIX)) return
+  const winId = Number(port.name.slice(SIDEPANEL_PORT_PREFIX.length))
+  if (!Number.isFinite(winId) || winId < 0) return
+  openSidePanelPorts.set(winId, port)
+  port.onDisconnect.addListener(() => {
+    if (openSidePanelPorts.get(winId) === port) {
+      openSidePanelPorts.delete(winId)
+    }
+  })
+})
 
 chrome.windows?.onFocusChanged?.addListener(winId => {
-  if (typeof winId === 'number' && winId >= 0) {
-    lastFocusedWindowId = winId
-  }
+  if (typeof winId !== 'number' || winId < 0) return
+  const seq = ++focusSeq
+  void chrome.windows
+    .get(winId)
+    .then(win => {
+      if (seq === focusSeq && win.type === 'normal') {
+        lastFocusedWindowId = winId
+      }
+    })
+    .catch(() => {})
 })
 
 chrome.windows?.onRemoved?.addListener(winId => {
-  openSidePanelWindows.delete(winId)
+  openSidePanelPorts.delete(winId)
   if (lastFocusedWindowId === winId) lastFocusedWindowId = -1
 })
 
 chrome.tabs.onActivated.addListener(info => {
-  if (info.windowId >= 0) {
-    lastFocusedWindowId = info.windowId
-  }
+  if (info.windowId < 0) return
+  void chrome.windows
+    ?.get?.(info.windowId)
+    .then(win => {
+      if (win.focused && win.type === 'normal') {
+        lastFocusedWindowId = info.windowId
+      }
+    })
+    .catch(() => {})
 })
 
-function toggleSidePanelForWindow(winId: number): void {
+function toggleSidePanelForWindow(winId: number, commandTime = Date.now()): void {
   if (winId < 0) return
-  if (openSidePanelWindows.has(winId)) {
-    openSidePanelWindows.delete(winId)
-    chrome.runtime.sendMessage({ type: 'vberry:close-panel', windowId: winId }).catch(() => {})
-    return
+  const port = openSidePanelPorts.get(winId)
+  if (port) {
+    openSidePanelPorts.delete(winId)
+    try {
+      port.postMessage({ type: 'vberry:close-panel', windowId: winId })
+      return
+    } catch {
+      // Port already disconnected; fall through synchronously to open with user gesture intact
+    }
   }
-  // Must be called synchronously inside user-gesture handler to preserve Chrome's user gesture
-  void chrome.sidePanel?.open?.({ windowId: winId }).catch(() => {})
+  // Must be called synchronously inside user-gesture handler to preserve Chrome's user gesture.
+  // If the MV3 service worker restarted while the panel stayed open, open() resolves as a no-op
+  // and the follow-up message closes only a panel mounted before this command.
+  const openOp = chrome.sidePanel?.open?.({ windowId: winId })
+  void Promise.resolve(openOp)
+    .catch(() => {})
+    .then(() => {
+      chrome.runtime
+        .sendMessage({ type: 'vberry:close-panel', windowId: winId, openedBefore: commandTime })
+        .catch(() => {})
+    })
 }
 
 async function initSidePanelBehavior(): Promise<void> {
@@ -79,14 +120,6 @@ async function initSidePanelBehavior(): Promise<void> {
 
 chrome.runtime.onMessage.addListener((msg: RuntimeMessage, _sender, sendResponse) => {
   if (!msg || typeof msg !== 'object') return
-  if (msg.type === 'vberry:panel-open' && msg.windowId >= 0) {
-    openSidePanelWindows.add(msg.windowId)
-    return
-  }
-  if (msg.type === 'vberry:panel-close' && msg.windowId >= 0) {
-    openSidePanelWindows.delete(msg.windowId)
-    return
-  }
   if (msg.type === 'vberry:restore-snapshot') {
     void restoreSnapshot(msg.snapshot, msg.inNewWindow)
       .then(() => persistCurrentSession())
@@ -387,10 +420,25 @@ chrome.commands.onCommand.addListener((command, tab) => {
   const syncWinId = lastFocusedWindowId >= 0 ? lastFocusedWindowId : tab?.windowId
 
   if (command === 'toggle_side_panel') {
+    const commandTime = Date.now()
     if (syncWinId !== undefined && syncWinId >= 0) {
-      toggleSidePanelForWindow(syncWinId)
+      toggleSidePanelForWindow(syncWinId, commandTime)
     } else if (tab?.id !== undefined) {
-      void chrome.sidePanel?.open?.({ tabId: tab.id }).catch(() => {})
+      const openOp = chrome.sidePanel?.open?.({ tabId: tab.id })
+      void Promise.resolve(openOp)
+        .catch(() => {})
+        .then(async () => {
+          const winId = await getTargetWindowId()
+          if (winId >= 0) {
+            chrome.runtime
+              .sendMessage({ type: 'vberry:close-panel', windowId: winId, openedBefore: commandTime })
+              .catch(() => {})
+          }
+        })
+    } else {
+      void getTargetWindowId().then(winId => {
+        if (winId >= 0) toggleSidePanelForWindow(winId, commandTime)
+      })
     }
     return
   }

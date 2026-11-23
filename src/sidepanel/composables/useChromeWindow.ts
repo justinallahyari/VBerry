@@ -74,6 +74,8 @@ export function useChromeWindow(hooks: {
   let refreshTimer: ReturnType<typeof setTimeout> | undefined
   let activeRetryTimers: ReturnType<typeof setTimeout>[] = []
   let refreshSeq = 0
+  const mountedAt = Date.now()
+  let panelPort: chrome.runtime.Port | null = null
 
   function clearActiveRetryTimers() {
     for (const t of activeRetryTimers) clearTimeout(t)
@@ -430,7 +432,13 @@ export function useChromeWindow(hooks: {
   function onRuntimeMessage(msg: RuntimeMessage) {
     if (!msg || typeof msg !== 'object') return
     if (msg.type === 'vberry:close-panel') {
-      if (!isPopup && msg.windowId === windowId.value) window.close()
+      if (
+        !isPopup &&
+        msg.windowId === windowId.value &&
+        (msg.openedBefore === undefined || mountedAt < msg.openedBefore)
+      ) {
+        window.close()
+      }
       return
     }
     if (msg.type !== 'vberry:command') return
@@ -438,16 +446,29 @@ export function useChromeWindow(hooks: {
     hooks.onCommand?.(msg.command)
   }
 
+  function connectPanelPort() {
+    if (isPopup || windowId.value < 0 || panelPort || !chrome.runtime?.connect) return
+    try {
+      const port = chrome.runtime.connect({ name: `vberry-sidepanel:${windowId.value}` })
+      panelPort = port
+      port.onMessage.addListener((msg: RuntimeMessage) => {
+        onRuntimeMessage(msg)
+      })
+      port.onDisconnect.addListener(() => {
+        if (panelPort === port) panelPort = null
+      })
+    } catch {
+      // Ignore if extension context is reloading/invalidated
+    }
+  }
+
   function onWindowFocusChanged() {
     scheduleRefresh()
   }
 
-  function notifyPanelClosed() {
-    if (!isPopup && windowId.value >= 0) {
-      chrome.runtime
-        .sendMessage({ type: 'vberry:panel-close', windowId: windowId.value })
-        .catch(() => {})
-    }
+  function onWindowFocus() {
+    connectPanelPort()
+    scheduleRefresh()
   }
 
   onMounted(async () => {
@@ -466,10 +487,8 @@ export function useChromeWindow(hooks: {
       } else if (activeView.value.kind === 'search') {
         activeView.value = lastTabView.value
       }
-    } else if (windowId.value >= 0) {
-      chrome.runtime
-        .sendMessage({ type: 'vberry:panel-open', windowId: windowId.value })
-        .catch(() => {})
+    } else {
+      connectPanelPort()
     }
 
     chrome.tabs.onCreated.addListener(scheduleRefresh)
@@ -490,12 +509,12 @@ export function useChromeWindow(hooks: {
 
     chrome.storage.onChanged.addListener(onStorageChanged)
     chrome.runtime.onMessage.addListener(onRuntimeMessage)
-    window.addEventListener('focus', scheduleRefresh)
-    window.addEventListener('pagehide', notifyPanelClosed)
+    window.addEventListener('focus', onWindowFocus)
   })
 
   onUnmounted(() => {
-    notifyPanelClosed()
+    panelPort?.disconnect()
+    panelPort = null
     clearTimeout(refreshTimer)
     clearActiveRetryTimers()
     chrome.tabs.onCreated.removeListener(scheduleRefresh)
@@ -516,8 +535,7 @@ export function useChromeWindow(hooks: {
 
     chrome.storage.onChanged.removeListener(onStorageChanged)
     chrome.runtime.onMessage.removeListener(onRuntimeMessage)
-    window.removeEventListener('focus', scheduleRefresh)
-    window.removeEventListener('pagehide', notifyPanelClosed)
+    window.removeEventListener('focus', onWindowFocus)
   })
 
   return {

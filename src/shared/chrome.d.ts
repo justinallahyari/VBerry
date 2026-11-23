@@ -4,12 +4,30 @@ declare namespace chrome {
       tab?: tabs.Tab
       id?: string
     }
+    interface Port {
+      name: string
+      disconnect(): void
+      postMessage(message: unknown): void
+      onMessage: {
+        addListener(cb: (message: any, port: Port) => void): void
+        removeListener(cb: (message: any, port: Port) => void): void
+      }
+      onDisconnect: {
+        addListener(cb: (port: Port) => void): void
+        removeListener(cb: (port: Port) => void): void
+      }
+    }
     const id: string
     const lastError: { message?: string } | undefined
     function getURL(path: string): string
     function getManifest(): { version: string; name: string }
     function openOptionsPage(): Promise<void>
+    function connect(connectInfo?: { name?: string }): Port
     function sendMessage<T = unknown>(message: unknown): Promise<T>
+    const onConnect: {
+      addListener(cb: (port: Port) => void): void
+      removeListener(cb: (port: Port) => void): void
+    }
     const onMessage: {
       addListener(
         cb: (

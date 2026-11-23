@@ -165,8 +165,6 @@ export type ActiveView =
 
 export type RuntimeMessage =
   | { type: 'vberry:command'; command: string; windowId?: number }
-  | { type: 'vberry:panel-open'; windowId: number }
-  | { type: 'vberry:panel-close'; windowId: number }
-  | { type: 'vberry:close-panel'; windowId: number }
+  | { type: 'vberry:close-panel'; windowId: number; openedBefore?: number }
   | { type: 'vberry:restore-snapshot'; snapshot: VBerrySnapshot; inNewWindow: boolean }
   | { type: 'vberry:discard-tabs'; tabIds: number[]; windowId: number }
