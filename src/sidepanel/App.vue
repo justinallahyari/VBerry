@@ -58,8 +58,19 @@ import SidePanelMenus, {
   type ItemMenuState,
   type TabMenuState,
 } from './components/SidePanelMenus.vue'
+import { vAutofocus } from '@/popup/autofocus'
+
+const props = withDefaults(
+  defineProps<{
+    mode?: 'sidepanel' | 'popup'
+  }>(),
+  { mode: 'sidepanel' }
+)
+
+const isPopup = props.mode === 'popup'
 
 const searchQuery = ref('')
+const searchInputRef = ref<HTMLInputElement | null>(null)
 const searchCursor = ref<number>(-1)
 const selectedIds = ref<Set<number>>(new Set())
 const lastClickedId = ref<number | null>(null)
@@ -76,6 +87,11 @@ const bookmarkModalFolders = ref<BookmarkFolderOption[]>([])
 const tabMenu = ref<TabMenuState | null>(null)
 const groupMenu = ref<GroupMenuState | null>(null)
 const itemMenu = ref<ItemMenuState | null>(null)
+
+async function focusSearchBox() {
+  await nextTick()
+  searchInputRef.value?.focus({ preventScroll: true })
+}
 
 const {
   windowId,
@@ -98,8 +114,9 @@ const {
   openNewTabInActiveView,
   openUrlInSpecificTarget,
 } = useChromeWindow({
+  mode: props.mode,
   onCommand(command) {
-    if (command === 'new_tab_in_panel') {
+    if (!isPopup && command === 'new_tab_in_panel') {
       void openNewTabInActiveView()
     }
   },
@@ -114,6 +131,9 @@ const {
     }
     searchCursor.value =
       settings.value.autoHighlightSearchMatch && searchQuery.value.trim() ? 0 : -1
+    if (isPopup && settings.value.focusSearchOnPanelSwitch) {
+      void focusSearchBox()
+    }
   },
 })
 
@@ -148,17 +168,13 @@ const activeTabList = computed(() => {
 
 const visibleTabNodes = computed(() => activeTabList.value.filter(n => !n.hidden))
 
+const isTabView = computed(() => {
+  const kind = activeView.value.kind
+  return kind === 'ungrouped' || kind === 'group' || kind === 'saved'
+})
+
 const highlightedTabId = computed<number | null>(() => {
-  if (searchCursor.value < 0) return null
-  const view = activeView.value
-  if (
-    view.kind === 'search' ||
-    view.kind === 'bookmarks' ||
-    view.kind === 'history' ||
-    view.kind === 'snapshots'
-  ) {
-    return null
-  }
+  if (searchCursor.value < 0 || !isTabView.value) return null
   const list = visibleTabNodes.value
   if (!list.length) return null
   const idx = Math.min(searchCursor.value, list.length - 1)
@@ -182,6 +198,15 @@ const searchPlaceholder = computed(() => {
 watch(searchQuery, q => {
   searchCursor.value = settings.value.autoHighlightSearchMatch && q.trim() ? 0 : -1
 })
+
+watch(
+  () => visibleTabNodes.value.length,
+  len => {
+    if (isTabView.value && searchCursor.value >= len) {
+      searchCursor.value = len - 1
+    }
+  }
+)
 
 function getSearchableCount(): number {
   const view = activeView.value
@@ -207,6 +232,7 @@ function moveSearchCursor(delta: 1 | -1) {
 
 async function openUrlFromSearchView(url: string, background: boolean) {
   await openNewTabInActiveView(url, background)
+  if (isPopup && !background) window.close()
 }
 
 async function openBookmarkUrl(url: string, background: boolean) {
@@ -232,6 +258,7 @@ async function activateSearchSelection() {
     clearAfter()
     if (activated.kind === 'tab') {
       await chrome.tabs.update(activated.tabId, { active: true }).catch(() => {})
+      if (isPopup) window.close()
     }
     return
   }
@@ -251,8 +278,24 @@ async function activateSearchSelection() {
     if (node) {
       clearAfter()
       await chrome.tabs.update(node.id, { active: true }).catch(() => {})
+      if (isPopup) window.close()
     }
   }
+}
+
+function closeSelectedTabsByKey(e: KeyboardEvent): boolean {
+  if (!isTabView.value || e.ctrlKey || e.metaKey || e.altKey) return false
+  if (highlightedTabId.value !== null) {
+    e.preventDefault()
+    void closeTab(highlightedTabId.value)
+    return true
+  }
+  if (selectedIds.value.size > 0) {
+    e.preventDefault()
+    void closeTab([...selectedIds.value][0])
+    return true
+  }
+  return false
 }
 
 function onSearchKeyDown(e: KeyboardEvent) {
@@ -267,18 +310,23 @@ function onSearchKeyDown(e: KeyboardEvent) {
       e.preventDefault()
       void activateSearchSelection()
     }
+  } else if (isPopup && e.key === 'Backspace' && !searchQuery.value) {
+    closeSelectedTabsByKey(e)
   } else if (e.key === 'Escape') {
     if (searchQuery.value) {
       e.preventDefault()
       searchQuery.value = ''
       searchCursor.value = -1
+    } else if (isPopup) {
+      e.preventDefault()
+      window.close()
     }
   }
 }
 
 // Tab list interactions
-async function activateTab(tabId: number, e: MouseEvent) {
-  if (e.metaKey || e.ctrlKey) {
+async function activateTab(tabId: number, e?: MouseEvent) {
+  if (e && (e.metaKey || e.ctrlKey)) {
     e.preventDefault()
     const next = new Set(selectedIds.value)
     if (next.has(tabId)) next.delete(tabId)
@@ -288,7 +336,7 @@ async function activateTab(tabId: number, e: MouseEvent) {
     return
   }
 
-  if (e.shiftKey) {
+  if (e && e.shiftKey) {
     e.preventDefault()
     const visible = activeTabList.value.filter(n => !n.hidden).map(n => n.id)
     const activeId = tabs.value.find(t => t.active)?.id ?? null
@@ -316,12 +364,19 @@ async function activateTab(tabId: number, e: MouseEvent) {
     searchCursor.value = -1
   }
   await chrome.tabs.update(tabId, { active: true }).catch(() => {})
+  if (isPopup) window.close()
 }
 
 async function closeTab(tabId: number) {
   const ids = selectedIds.value.has(tabId) ? [...selectedIds.value] : [tabId]
   selectedIds.value = new Set()
-  await chrome.tabs.remove(ids).catch(() => {})
+  try {
+    await chrome.tabs.remove(ids)
+    const removed = new Set(ids)
+    tabs.value = tabs.value.filter(t => t.id === undefined || !removed.has(t.id))
+  } catch {
+    // Ignore if tab was already closed
+  }
   scheduleActiveSyncAfterRemove(ids)
 }
 
@@ -343,7 +398,7 @@ async function handleDropTab(
 ) {
   const draggedTab = tabs.value.find(t => t.id === draggedId)
   const targetTab = tabs.value.find(t => t.id === targetId)
-  if (!draggedTab || !targetTab) return
+  if (!draggedTab || !targetTab || draggedId === targetId) return
 
   const subtreeIds = getSubtreeIds(draggedId, tabs.value, treeMeta.value)
   if (subtreeIds.includes(targetId)) return
@@ -365,7 +420,7 @@ async function handleDropTab(
     nextMeta[targetId] = { ...nextMeta[targetId], folded: false }
   } else {
     const targetParent = nextMeta[targetId]?.parentId
-    if (targetParent !== undefined) {
+    if (targetParent !== undefined && targetParent !== draggedId) {
       nextMeta[draggedId] = { ...nextMeta[draggedId], parentId: targetParent }
     } else if (nextMeta[draggedId]) {
       const { parentId: _, ...rest } = nextMeta[draggedId]
@@ -383,16 +438,20 @@ async function handleDropOnPanel(e: DragEvent, targetGroupId: number | SavedPane
   const draggedId = Number(e.dataTransfer?.getData('text/vberry-tab-id'))
   if (!Number.isFinite(draggedId)) return
 
-  const subtreeIds = getSubtreeIds(draggedId, tabs.value, treeMeta.value)
+  const toMove = selectedIds.value.has(draggedId)
+    ? [...selectedIds.value]
+    : getSubtreeIds(draggedId, tabs.value, treeMeta.value)
   if (typeof targetGroupId === 'number') {
-    await moveTabsToGroup(subtreeIds, targetGroupId).catch(() => {})
+    await moveTabsToGroup(toMove, targetGroupId).catch(() => {})
     virtualGroupMap.value = await loadVirtualGroupMap()
   } else {
-    const groupId = await moveTabsToSavedPanel(windowId.value, subtreeIds, targetGroupId)
+    if (windowId.value < 0) windowId.value = await getTargetWindowId()
+    const groupId = await moveTabsToSavedPanel(windowId.value, toMove, targetGroupId)
     virtualGroupMap.value = await loadVirtualGroupMap()
     activeView.value =
       groupId !== null ? { kind: 'group', groupId } : { kind: 'saved', savedId: targetGroupId.id }
   }
+  selectedIds.value = new Set()
 }
 
 // Group modal helpers
@@ -427,6 +486,15 @@ async function submitGroupModal() {
     await refreshChromeState()
   } else if (m.mode === 'edit-native' && m.groupId !== undefined) {
     await chrome.tabGroups.update(m.groupId, { title, color: m.color }).catch(() => {})
+    const oldGroup = groups.value.find(g => g.id === m.groupId)
+    if (oldGroup) {
+      const oldTitle = (oldGroup.title ?? '').trim().toLowerCase()
+      const idx = savedPanels.value.findIndex(p => p.title.trim().toLowerCase() === oldTitle)
+      if (idx !== -1) {
+        savedPanels.value[idx] = { ...savedPanels.value[idx], title, color: m.color }
+        await saveSavedPanels(savedPanels.value)
+      }
+    }
   } else if (m.mode === 'edit-saved' && m.savedId) {
     const next = savedPanels.value.map(p =>
       p.id === m.savedId ? { ...p, title, color: m.color } : p
@@ -636,6 +704,7 @@ async function itemMenuAction(action: string, target?: number | SavedPanel) {
       if (url) {
         if (menu.kind === 'bookmark') await recordRecentBookmark(url)
         await openNewTabInActiveView(url, false)
+        if (isPopup) window.close()
       }
       return
     case 'open-bg':
@@ -648,6 +717,7 @@ async function itemMenuAction(action: string, target?: number | SavedPanel) {
       if (url && target !== undefined) {
         if (menu.kind === 'bookmark') await recordRecentBookmark(url)
         await openUrlInSpecificTarget(url, target, false)
+        if (isPopup) window.close()
       }
       return
     case 'copy-url':
@@ -1053,34 +1123,78 @@ function openOptions() {
   void chrome.runtime.openOptionsPage()
 }
 
-function onWindowBlur() {
-  closeMenus()
-}
-
 function onKeyDown(e: KeyboardEvent) {
   if (e.key === 'Escape') {
+    const hadOverlay = Boolean(
+      tabMenu.value || groupMenu.value || itemMenu.value || groupModal.value || bookmarkModal.value
+    )
     closeMenus()
     if (bookmarkModal.value) bookmarkModal.value = null
     if (groupModal.value) groupModal.value = null
+    if (isPopup && !hadOverlay && !searchQuery.value) {
+      e.preventDefault()
+      window.close()
+    }
+    return
   }
-}
 
-function onVisibilityChange() {
-  closeMenus()
+  if (!isPopup || groupModal.value || bookmarkModal.value) return
+
+  // Native Tab / Shift+Tab moves between UI controls and Enter/Space activates focused buttons.
+  // ArrowUp/ArrowDown always navigate search results; printable non-space keys focus search.
+  const el = searchInputRef.value
+  if (!el || document.activeElement === el) return
+
+  const activeTag = document.activeElement?.tagName
+  const isTextControl =
+    activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT'
+  const isButtonControl = activeTag === 'BUTTON' || activeTag === 'A'
+
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    if (!isTextControl) {
+      el.focus({ preventScroll: true })
+      onSearchKeyDown(e)
+    }
+    return
+  }
+
+  if (e.key === 'Enter' && !isTextControl && !isButtonControl) {
+    if (searchCursor.value >= 0 || searchQuery.value.trim()) {
+      el.focus({ preventScroll: true })
+      onSearchKeyDown(e)
+    }
+    return
+  }
+
+  if (e.key === 'Backspace' && !isTextControl) {
+    closeSelectedTabsByKey(e)
+    return
+  }
+
+  if (
+    !isTextControl &&
+    e.key.length === 1 &&
+    !e.ctrlKey &&
+    !e.metaKey &&
+    !e.altKey &&
+    !(isButtonControl && e.key === ' ')
+  ) {
+    el.focus({ preventScroll: true })
+  }
 }
 
 onMounted(() => {
   window.addEventListener('click', closeMenus)
-  window.addEventListener('blur', onWindowBlur)
+  window.addEventListener('blur', closeMenus)
   window.addEventListener('keydown', onKeyDown)
-  document.addEventListener('visibilitychange', onVisibilityChange)
+  document.addEventListener('visibilitychange', closeMenus)
 })
 
 onUnmounted(() => {
   window.removeEventListener('click', closeMenus)
-  window.removeEventListener('blur', onWindowBlur)
+  window.removeEventListener('blur', closeMenus)
   window.removeEventListener('keydown', onKeyDown)
-  document.removeEventListener('visibilitychange', onVisibilityChange)
+  document.removeEventListener('visibilitychange', closeMenus)
 })
 </script>
 
@@ -1178,7 +1292,7 @@ onUnmounted(() => {
 
       <div class="utility-strip">
         <button
-          v-if="settings.unifiedSearch && !settings.hideUnifiedSearchInSidePanel"
+          v-if="settings.unifiedSearch && (isPopup || !settings.hideUnifiedSearchInSidePanel)"
           type="button"
           class="icon-btn"
           :class="{ active: activeView.kind === 'search' }"
@@ -1284,27 +1398,23 @@ onUnmounted(() => {
     </header>
 
     <!-- Search Bar -->
-    <div v-if="activeView.kind !== 'snapshots'" class="search-bar">
+    <form v-if="activeView.kind !== 'snapshots'" role="search" class="search-bar" @submit.prevent>
       <input
+        id="vberry-search"
+        ref="searchInputRef"
         v-model="searchQuery"
+        v-autofocus="isPopup"
         class="search-input"
         type="search"
+        name="searchText"
+        autocomplete="off"
         :placeholder="searchPlaceholder"
         @keydown="onSearchKeyDown"
       />
-    </div>
+    </form>
 
     <!-- Pinned Tabs Strip -->
-    <div
-      v-if="
-        pinnedTabs.length &&
-        activeView.kind !== 'search' &&
-        activeView.kind !== 'bookmarks' &&
-        activeView.kind !== 'history' &&
-        activeView.kind !== 'snapshots'
-      "
-      class="pinned-strip"
-    >
+    <div v-if="pinnedTabs.length && isTabView" class="pinned-strip">
       <button
         v-for="pt in pinnedTabs"
         :key="pt.id"
@@ -1313,8 +1423,8 @@ onUnmounted(() => {
         :class="{ active: pt.active, discarded: pt.discarded }"
         :title="pt.title || pt.url"
         @mousedown.left="pt.id !== undefined && activateTab(pt.id, $event)"
-        @keydown.enter.prevent="pt.id !== undefined && activateTab(pt.id, $event as unknown as MouseEvent)"
-        @keydown.space.prevent="pt.id !== undefined && activateTab(pt.id, $event as unknown as MouseEvent)"
+        @keydown.enter.prevent="pt.id !== undefined && activateTab(pt.id)"
+        @keydown.space.prevent="pt.id !== undefined && activateTab(pt.id)"
         @auxclick.middle.prevent="pt.id !== undefined && closeTab(pt.id)"
         @contextmenu.prevent="openTabContextMenu(pt, $event)"
       >
@@ -1427,6 +1537,14 @@ onUnmounted(() => {
       @group-action="groupMenuAction"
       @item-action="itemMenuAction"
     />
+
+    <footer v-if="isPopup" class="popup-tip">
+      <span><kbd>Tab</kbd> navigate controls</span>
+      <span><kbd>↑↓</kbd> {{ isTabView ? 'select tab' : 'select result' }}</span>
+      <span><kbd>Enter</kbd> open</span>
+      <span v-if="isTabView"><kbd>Backspace</kbd> close tab</span>
+      <span><kbd>Esc</kbd> close</span>
+    </footer>
   </div>
 </template>
 
@@ -1625,5 +1743,30 @@ onUnmounted(() => {
   width: var(--icon-size);
   height: var(--icon-size);
   border-radius: 2px;
+}
+
+.popup-tip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 5px 8px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+  font-size: 11px;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.popup-tip kbd {
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  color: var(--text);
 }
 </style>

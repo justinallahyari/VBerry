@@ -1,8 +1,9 @@
 import { createApp } from 'vue'
 import '@/shared/theme.css'
-import PopupApp from './PopupApp.vue'
+import './popup.css'
+import App from '@/sidepanel/App.vue'
 
 // Mirror Bitwarden's PopupSizeService: set explicit body width in JS before mount
 document.body.style.width = '500px'
 
-createApp(PopupApp).mount('#app')
+createApp(App, { mode: 'popup' }).mount('#app')

@@ -40,10 +40,13 @@ export interface SavedPanel {
   sourceSideberyId?: string
 }
 
+type PopupDefaultView = 'search' | 'tabs' | 'bookmarks' | 'history' | 'snapshots'
+
 export interface Settings {
   theme: 'auto' | 'light' | 'dark'
   density: 'compact' | 'comfortable'
   browserMode: 'auto' | 'chrome' | 'vivaldi'
+  popupDefaultView: PopupDefaultView
   fontSize: number
   iconSize: number
   uiIconSize: number
@@ -78,6 +81,7 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: 'auto',
   density: 'comfortable',
   browserMode: 'auto',
+  popupDefaultView: 'search',
   fontSize: 13,
   iconSize: 16,
   uiIconSize: 19,

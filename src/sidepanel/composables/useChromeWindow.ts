@@ -27,6 +27,34 @@ type TabPanelView =
   | { kind: 'group'; groupId: number }
   | { kind: 'saved'; savedId: string }
 
+function isUtilityView(view: ActiveView): boolean {
+  return (
+    view.kind === 'search' ||
+    view.kind === 'bookmarks' ||
+    view.kind === 'history' ||
+    view.kind === 'snapshots'
+  )
+}
+
+export function resolvePopupInitialView(
+  settings: Settings,
+  fallbackTabView: ActiveView
+): ActiveView {
+  switch (settings.popupDefaultView) {
+    case 'tabs':
+      return fallbackTabView
+    case 'bookmarks':
+      return settings.showBookmarksPanel ? { kind: 'bookmarks' } : fallbackTabView
+    case 'history':
+      return settings.showHistoryPanel ? { kind: 'history' } : fallbackTabView
+    case 'snapshots':
+      return settings.showSnapshotsPanel ? { kind: 'snapshots' } : fallbackTabView
+    case 'search':
+    default:
+      return settings.unifiedSearch ? { kind: 'search' } : fallbackTabView
+  }
+}
+
 function applyThemeAndCss(s: Settings): void {
   const root = document.documentElement
   if (s.theme === 'auto') root.removeAttribute('data-theme')
@@ -251,7 +279,7 @@ export function useChromeWindow(hooks: {
       if (activeTab && !activeTab.pinned) {
         const nextView = viewForTab(activeTab, winGroups)
         lastTabView.value = nextView
-        if (!(isPopup && settings.value.unifiedSearch)) {
+        if (!isPopup) {
           activeView.value = nextView
         }
       }
@@ -288,13 +316,7 @@ export function useChromeWindow(hooks: {
     if (windowId.value < 0) return
 
     const view = activeView.value
-    const isUtility =
-      view.kind === 'search' ||
-      view.kind === 'bookmarks' ||
-      view.kind === 'history' ||
-      view.kind === 'snapshots'
-
-    let target: TabPanelView = isUtility ? lastTabView.value : view
+    let target: TabPanelView = isUtilityView(view) ? lastTabView.value : (view as TabPanelView)
     if (target.kind === 'group') {
       const gid = target.groupId
       if (!groups.value.some(g => g.id === gid)) target = { kind: 'ungrouped' }
@@ -417,12 +439,7 @@ export function useChromeWindow(hooks: {
       tabs.value = tabs.value.map(t => ({ ...t, active: t.id === info.tabId }))
     }
     scheduleRefresh()
-    const isUtility =
-      activeView.value.kind === 'search' ||
-      activeView.value.kind === 'bookmarks' ||
-      activeView.value.kind === 'history' ||
-      activeView.value.kind === 'snapshots'
-    if (isUtility) return
+    if (isUtilityView(activeView.value)) return
     const tab = tabs.value.find(t => t.id === info.tabId)
     if (tab && !tab.pinned) {
       activeView.value = viewForTab(tab)
@@ -479,14 +496,13 @@ export function useChromeWindow(hooks: {
     treeMeta.value = state.treeMeta
     virtualGroupMap.value = state.virtualGroups
     applyThemeAndCss(state.settings)
+    if (isPopup) {
+      activeView.value = resolvePopupInitialView(state.settings, lastTabView.value)
+    }
 
     await refreshChromeState(true)
     if (isPopup) {
-      if (settings.value.unifiedSearch) {
-        activeView.value = { kind: 'search' }
-      } else if (activeView.value.kind === 'search') {
-        activeView.value = lastTabView.value
-      }
+      activeView.value = resolvePopupInitialView(settings.value, lastTabView.value)
     } else {
       connectPanelPort()
     }

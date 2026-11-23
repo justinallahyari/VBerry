@@ -286,6 +286,36 @@ onUnmounted(() => {
       <h2>Quick Search</h2>
       <p class="hint">Choose what appears when you search tabs, bookmarks, and history.</p>
 
+      <div class="setting-row">
+        <div>
+          <div class="label">Open Quick Search popup to</div>
+          <div class="desc">
+            Choose which view appears first when you open the popup menu.
+            <span
+              v-if="settings.popupDefaultView === 'search' && !settings.unifiedSearch"
+              class="warn-inline"
+            >
+              Unified Search is off — popup will open to Tabs.
+            </span>
+          </div>
+        </div>
+        <select
+          :value="settings.popupDefaultView"
+          @change="
+            updateSetting(
+              'popupDefaultView',
+              ($event.target as HTMLSelectElement).value as Settings['popupDefaultView']
+            )
+          "
+        >
+          <option value="search">Unified Search</option>
+          <option value="tabs">Tabs (active group)</option>
+          <option value="bookmarks">Bookmarks</option>
+          <option value="history">History</option>
+          <option value="snapshots">Snapshots</option>
+        </select>
+      </div>
+
       <label class="setting-row check-row">
         <div>
           <div class="label">Unified Search</div>

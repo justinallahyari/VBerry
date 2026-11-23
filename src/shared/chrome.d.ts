@@ -17,10 +17,8 @@ declare namespace chrome {
         removeListener(cb: (port: Port) => void): void
       }
     }
-    const id: string
     const lastError: { message?: string } | undefined
     function getURL(path: string): string
-    function getManifest(): { version: string; name: string }
     function openOptionsPage(): Promise<void>
     function connect(connectInfo?: { name?: string }): Port
     function sendMessage<T = unknown>(message: unknown): Promise<T>
@@ -70,12 +68,10 @@ declare namespace chrome {
       title?: string
     }
     function query(info: { windowId?: number; title?: string; color?: ColorEnum; collapsed?: boolean }): Promise<TabGroup[]>
-    function get(groupId: number): Promise<TabGroup>
     function update(
       groupId: number,
       props: { collapsed?: boolean; color?: ColorEnum; title?: string }
     ): Promise<TabGroup>
-    function move(groupId: number, props: { index: number; windowId?: number }): Promise<TabGroup>
     const onCreated: { addListener(cb: (group: TabGroup) => void): void; removeListener(cb: (group: TabGroup) => void): void }
     const onUpdated: { addListener(cb: (group: TabGroup) => void): void; removeListener(cb: (group: TabGroup) => void): void }
     const onRemoved: { addListener(cb: (group: TabGroup) => void): void; removeListener(cb: (group: TabGroup) => void): void }
