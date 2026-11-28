@@ -1,7 +1,10 @@
 import {
   DEFAULT_SETTINGS,
+  DEFAULT_SYNC_CONFIG,
   type SavedPanel,
   type Settings,
+  type SyncConfig,
+  type SyncStateMeta,
   type TabTreeMap,
   type VBerrySnapshot,
 } from './types'
@@ -10,12 +13,16 @@ export const STORAGE_KEYS = {
   settings: 'vberry_settings',
   savedPanels: 'vberry_saved_panels',
   snapshots: 'vberry_snapshots',
+  syncConfig: 'vberry_sync_config',
+  syncMeta: 'vberry_sync_meta',
   treeMeta: 'vberry_tree_meta',
   virtualGroups: 'vberry_virtual_groups',
   lastSession: 'vberry_last_session',
   sessionRestored: 'vberry_session_restored',
   recentBookmarks: 'vberry_recent_bookmarks',
 } as const
+
+const MAX_DELETED_SNAPSHOT_IDS = 150
 
 /**
  * Unwrap Vue reactive Proxies into plain JSON-safe values before writing to chrome.storage
@@ -35,12 +42,92 @@ export function toArray<T>(value: unknown): T[] {
   return []
 }
 
-function normalizeSettings(raw: unknown): Settings {
-  const obj = (raw && typeof raw === 'object' ? raw : {}) as Partial<Settings>
+export function normalizeSettings(raw: unknown): Settings {
+  const obj = { ...(raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}) }
+  delete obj.accentColor
+  const overrides =
+    obj.themeOverrides &&
+    typeof obj.themeOverrides === 'object' &&
+    !Array.isArray(obj.themeOverrides)
+      ? (obj.themeOverrides as Settings['themeOverrides'])
+      : {}
   return {
     ...DEFAULT_SETTINGS,
-    ...obj,
+    ...(obj as Partial<Settings>),
+    customThemes: toArray(obj.customThemes),
+    themeOverrides: overrides,
   }
+}
+
+export function normalizeSyncConfig(raw: unknown): SyncConfig {
+  const obj = (raw && typeof raw === 'object' ? raw : {}) as Partial<SyncConfig>
+  return {
+    enabled: typeof obj.enabled === 'boolean' ? obj.enabled : DEFAULT_SYNC_CONFIG.enabled,
+    syncSettings:
+      typeof obj.syncSettings === 'boolean' ? obj.syncSettings : DEFAULT_SYNC_CONFIG.syncSettings,
+    syncSnapshots:
+      typeof obj.syncSnapshots === 'boolean'
+        ? obj.syncSnapshots
+        : DEFAULT_SYNC_CONFIG.syncSnapshots,
+  }
+}
+
+export function normalizeSyncMeta(raw: unknown, fallbackDeviceId?: string): SyncStateMeta {
+  const obj = (raw && typeof raw === 'object' ? raw : {}) as Partial<SyncStateMeta>
+  return {
+    deviceId:
+      typeof obj.deviceId === 'string' && obj.deviceId
+        ? obj.deviceId
+        : (fallbackDeviceId ?? uid('dev')),
+    settingsUpdatedAt: typeof obj.settingsUpdatedAt === 'number' ? obj.settingsUpdatedAt : 0,
+    snapshotsUpdatedAt: typeof obj.snapshotsUpdatedAt === 'number' ? obj.snapshotsUpdatedAt : 0,
+    appliedSettingsRev: typeof obj.appliedSettingsRev === 'number' ? obj.appliedSettingsRev : 0,
+    appliedSnapshotsRev: typeof obj.appliedSnapshotsRev === 'number' ? obj.appliedSnapshotsRev : 0,
+    deletedSnapshotIds: Array.isArray(obj.deletedSnapshotIds)
+      ? obj.deletedSnapshotIds.filter((x): x is string => typeof x === 'string')
+      : [],
+    lastSyncedAt: typeof obj.lastSyncedAt === 'number' ? obj.lastSyncedAt : null,
+    lastError: typeof obj.lastError === 'string' ? obj.lastError : null,
+    bytesInUse: typeof obj.bytesInUse === 'number' ? obj.bytesInUse : 0,
+    syncedSnapshotCount: typeof obj.syncedSnapshotCount === 'number' ? obj.syncedSnapshotCount : 0,
+    totalSnapshotCount: typeof obj.totalSnapshotCount === 'number' ? obj.totalSnapshotCount : 0,
+  }
+}
+
+function nextRevision(updatedAt: number, appliedRev: number): number {
+  return Math.max(Date.now(), updatedAt + 1, appliedRev + 1)
+}
+
+export async function loadSyncConfig(): Promise<SyncConfig> {
+  try {
+    const res = await chrome.storage.local.get(STORAGE_KEYS.syncConfig)
+    return normalizeSyncConfig(res?.[STORAGE_KEYS.syncConfig])
+  } catch {
+    return { ...DEFAULT_SYNC_CONFIG }
+  }
+}
+
+export async function saveSyncConfig(patch: Partial<SyncConfig>): Promise<SyncConfig> {
+  const cur = await loadSyncConfig()
+  const next = toPlain({ ...cur, ...patch })
+  await chrome.storage.local.set({ [STORAGE_KEYS.syncConfig]: next })
+  return next
+}
+
+export async function loadSyncMeta(): Promise<SyncStateMeta> {
+  try {
+    const res = await chrome.storage.local.get(STORAGE_KEYS.syncMeta)
+    return normalizeSyncMeta(res?.[STORAGE_KEYS.syncMeta])
+  } catch {
+    return normalizeSyncMeta(undefined)
+  }
+}
+
+export async function saveSyncMeta(patch: Partial<SyncStateMeta>): Promise<SyncStateMeta> {
+  const cur = await loadSyncMeta()
+  const next = toPlain({ ...cur, ...patch })
+  await chrome.storage.local.set({ [STORAGE_KEYS.syncMeta]: next })
+  return next
 }
 
 export async function loadSettings(): Promise<Settings> {
@@ -49,9 +136,16 @@ export async function loadSettings(): Promise<Settings> {
 }
 
 export async function saveSettings(patch: Partial<Settings>): Promise<Settings> {
-  const current = await loadSettings()
+  const [current, meta] = await Promise.all([loadSettings(), loadSyncMeta()])
   const next = toPlain({ ...current, ...patch })
-  await chrome.storage.local.set({ [STORAGE_KEYS.settings]: next })
+  const nextMeta: SyncStateMeta = {
+    ...meta,
+    settingsUpdatedAt: nextRevision(meta.settingsUpdatedAt, meta.appliedSettingsRev),
+  }
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.settings]: next,
+    [STORAGE_KEYS.syncMeta]: nextMeta,
+  })
   return next
 }
 
@@ -61,7 +155,15 @@ export async function loadSavedPanels(): Promise<SavedPanel[]> {
 }
 
 export async function saveSavedPanels(panels: SavedPanel[]): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEYS.savedPanels]: toPlain(Array.from(panels)) })
+  const meta = await loadSyncMeta()
+  const nextMeta: SyncStateMeta = {
+    ...meta,
+    settingsUpdatedAt: nextRevision(meta.settingsUpdatedAt, meta.appliedSettingsRev),
+  }
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.savedPanels]: toPlain(Array.from(panels)),
+    [STORAGE_KEYS.syncMeta]: nextMeta,
+  })
 }
 
 export async function loadSnapshots(): Promise<VBerrySnapshot[]> {
@@ -70,7 +172,69 @@ export async function loadSnapshots(): Promise<VBerrySnapshot[]> {
 }
 
 export async function saveSnapshots(snapshots: VBerrySnapshot[]): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEYS.snapshots]: toPlain(Array.from(snapshots)) })
+  const plain = toPlain(Array.from(snapshots))
+  const [prev, meta] = await Promise.all([
+    loadSnapshots().catch(() => [] as VBerrySnapshot[]),
+    loadSyncMeta(),
+  ])
+  const nextIds = new Set(plain.map(s => s.id))
+  const removedIds = prev.map(s => s.id).filter(id => id && !nextIds.has(id))
+  const deletedSet = new Set(meta.deletedSnapshotIds.filter(id => !nextIds.has(id)))
+  for (const id of removedIds) deletedSet.add(id)
+  const deletedSnapshotIds = [...deletedSet].slice(-MAX_DELETED_SNAPSHOT_IDS)
+
+  const nextMeta: SyncStateMeta = {
+    ...meta,
+    snapshotsUpdatedAt: nextRevision(meta.snapshotsUpdatedAt, meta.appliedSnapshotsRev),
+    deletedSnapshotIds,
+    totalSnapshotCount: plain.length,
+  }
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.snapshots]: plain,
+    [STORAGE_KEYS.syncMeta]: nextMeta,
+  })
+}
+
+export async function applySyncedConfigToLocal(
+  settings: Settings,
+  savedPanels: SavedPanel[],
+  remoteRev: number,
+  metaPatch?: Partial<SyncStateMeta>
+): Promise<void> {
+  const meta = await loadSyncMeta()
+  const nextMeta: SyncStateMeta = {
+    ...meta,
+    ...metaPatch,
+    settingsUpdatedAt: remoteRev,
+    appliedSettingsRev: remoteRev,
+  }
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.settings]: toPlain(normalizeSettings(settings)),
+    [STORAGE_KEYS.savedPanels]: toPlain(Array.from(savedPanels)),
+    [STORAGE_KEYS.syncMeta]: nextMeta,
+  })
+}
+
+export async function applySyncedSnapshotsToLocal(
+  snapshots: VBerrySnapshot[],
+  deletedSnapshotIds: string[],
+  remoteRev: number,
+  metaPatch?: Partial<SyncStateMeta>
+): Promise<void> {
+  const plain = toPlain(Array.from(snapshots))
+  const meta = await loadSyncMeta()
+  const nextMeta: SyncStateMeta = {
+    ...meta,
+    ...metaPatch,
+    snapshotsUpdatedAt: remoteRev,
+    appliedSnapshotsRev: remoteRev,
+    deletedSnapshotIds: deletedSnapshotIds.slice(-MAX_DELETED_SNAPSHOT_IDS),
+    totalSnapshotCount: plain.length,
+  }
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.snapshots]: plain,
+    [STORAGE_KEYS.syncMeta]: nextMeta,
+  })
 }
 
 export async function loadRecentBookmarkUrls(): Promise<string[]> {

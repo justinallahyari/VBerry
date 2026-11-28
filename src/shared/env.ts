@@ -1,13 +1,38 @@
-import { loadSettings } from './storage'
+import { loadSettings, STORAGE_KEYS } from './storage'
+import type { Settings } from './types'
 
 export const VIVALDI_STARTPAGE_URL = 'chrome://vivaldi-webui/startpage'
 const VIVALDI_UI_EXT_ID = 'mpognobbkildjkofajifpdfhcoklimli'
 const VIVALDI_DETECTED_KEY = 'vberry_detected_vivaldi'
+const NEGATIVE_CACHE_TTL_MS = 2500
 
 let cachedIsVivaldi = false
+let negativeCheckedUntil = 0
+let cachedBrowserMode: Settings['browserMode'] | null = null
+let boundStorageRef: unknown = null
+
+function ensureStorageCacheBinding(): boolean {
+  const storageObj = typeof chrome !== 'undefined' ? chrome.storage : undefined
+  if (!storageObj?.onChanged?.addListener) {
+    cachedBrowserMode = null
+    return false
+  }
+  if (boundStorageRef !== storageObj) {
+    boundStorageRef = storageObj
+    cachedBrowserMode = null
+    negativeCheckedUntil = 0
+    storageObj.onChanged.addListener((changes, area) => {
+      if (area !== 'local') return
+      if (changes[STORAGE_KEYS.settings]) cachedBrowserMode = null
+      if (changes[VIVALDI_DETECTED_KEY]?.newValue === true) cachedIsVivaldi = true
+    })
+  }
+  return true
+}
 
 async function persistVivaldiDetected(): Promise<void> {
   cachedIsVivaldi = true
+  negativeCheckedUntil = 0
   try {
     await chrome.storage?.local?.set({ [VIVALDI_DETECTED_KEY]: true })
   } catch {
@@ -36,15 +61,23 @@ function hasVivaldiProps(obj: unknown): boolean {
  * and persists `true` once detected.
  */
 export async function isVivaldi(): Promise<boolean> {
+  const canCache = ensureStorageCacheBinding()
   try {
-    const settings = await loadSettings()
-    if (settings.browserMode === 'vivaldi') return true
-    if (settings.browserMode === 'chrome') return false
+    if (!canCache || cachedBrowserMode === null) {
+      const settings = await loadSettings()
+      if (canCache) cachedBrowserMode = settings.browserMode
+      if (settings.browserMode === 'vivaldi') return true
+      if (settings.browserMode === 'chrome') return false
+    } else {
+      if (cachedBrowserMode === 'vivaldi') return true
+      if (cachedBrowserMode === 'chrome') return false
+    }
   } catch {
     // Continue with auto-detection
   }
 
   if (cachedIsVivaldi) return true
+  if (canCache && Date.now() < negativeCheckedUntil) return false
 
   try {
     const stored = await chrome.storage?.local?.get(VIVALDI_DETECTED_KEY)
@@ -96,11 +129,14 @@ export async function isVivaldi(): Promise<boolean> {
     // Ignore
   }
 
+  if (canCache) negativeCheckedUntil = Date.now() + NEGATIVE_CACHE_TTL_MS
   return false
 }
 
 export function resetVivaldiDetectionCache(): void {
   cachedIsVivaldi = false
+  negativeCheckedUntil = 0
+  cachedBrowserMode = null
 }
 
 async function getDefaultNewTabUrl(): Promise<string | undefined> {

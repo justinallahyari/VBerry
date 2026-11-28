@@ -180,6 +180,19 @@ function tabGroupBadge(tab: chrome.tabs.Tab): { title: string; color?: ChromeGro
   return null
 }
 
+function shortHost(rawUrl?: string): string {
+  if (!rawUrl) return ''
+  try {
+    const u = new URL(rawUrl)
+    if (u.protocol === 'http:' || u.protocol === 'https:') {
+      return u.hostname.replace(/^www\./, '')
+    }
+    return ''
+  } catch {
+    return ''
+  }
+}
+
 function getResultCount(): number {
   return flatRows.value.length
 }
@@ -259,7 +272,10 @@ function formatTime(ms?: number): string {
 <template>
   <div ref="containerRef" class="list-view">
     <template v-if="tabResults.length">
-      <div class="section-label">{{ isSearching ? 'Tabs' : 'Recent Tabs' }}</div>
+      <div class="section-label">
+        <span>{{ isSearching ? 'Open tabs' : 'Recent tabs' }}</span>
+        <span class="section-count">{{ tabResults.length }}</span>
+      </div>
       <div
         v-for="(tab, i) in tabResults"
         :key="`t_${tab.id}`"
@@ -280,21 +296,42 @@ function formatTime(ms?: number): string {
           :src="getChromeFaviconUrl(tab.url || tab.pendingUrl, 32) || tab.favIconUrl"
           alt=""
         />
-        <span v-else class="fav-fallback">•</span>
-        <span class="title">{{ tab.title || tab.url || 'New Tab' }}</span>
-        <span v-if="tabGroupBadge(tab)" class="group-chip">
-          <span
-            v-if="tabGroupBadge(tab)?.color"
-            class="chip-dot"
-            :style="{ background: `var(--grp-${tabGroupBadge(tab)?.color})` }"
+        <svg v-else class="fav-fallback" viewBox="0 0 16 16" aria-hidden="true">
+          <rect
+            x="2.5"
+            y="2.5"
+            width="11"
+            height="11"
+            rx="2.5"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.4"
           />
+          <path d="M2.5 6h11" fill="none" stroke="currentColor" stroke-width="1.3" />
+        </svg>
+        <span class="title">{{ tab.title || tab.url || 'New tab' }}</span>
+        <span v-if="shortHost(tab.url || tab.pendingUrl)" class="host">
+          {{ shortHost(tab.url || tab.pendingUrl) }}
+        </span>
+        <span
+          v-if="tabGroupBadge(tab)"
+          class="group-chip"
+          :style="{
+            '--chip-color': tabGroupBadge(tab)?.color
+              ? `var(--grp-${tabGroupBadge(tab)?.color})`
+              : 'var(--accent)',
+          }"
+        >
           {{ tabGroupBadge(tab)?.title }}
         </span>
       </div>
     </template>
 
     <template v-if="bookmarkResults.length">
-      <div class="section-label">{{ isSearching ? 'Bookmarks' : 'Recent Bookmarks' }}</div>
+      <div class="section-label">
+        <span>{{ isSearching ? 'Bookmarks' : 'Saved bookmarks' }}</span>
+        <span class="section-count">{{ bookmarkResults.length }}</span>
+      </div>
       <div
         v-for="(node, i) in bookmarkResults"
         :key="`b_${node.id}`"
@@ -308,11 +345,15 @@ function formatTime(ms?: number): string {
       >
         <img class="fav" :src="getChromeFaviconUrl(node.url, 32)" alt="" />
         <span class="title">{{ node.title || node.url }}</span>
+        <span v-if="shortHost(node.url)" class="host">{{ shortHost(node.url) }}</span>
       </div>
     </template>
 
     <template v-if="historyResults.length">
-      <div class="section-label">{{ isSearching ? 'History' : 'Recent History' }}</div>
+      <div class="section-label">
+        <span>{{ isSearching ? 'History' : 'Recently visited' }}</span>
+        <span class="section-count">{{ historyResults.length }}</span>
+      </div>
       <div
         v-for="(item, i) in historyResults"
         :key="`h_${item.id}`"
@@ -326,12 +367,22 @@ function formatTime(ms?: number): string {
       >
         <img class="fav" :src="getChromeFaviconUrl(item.url, 32)" alt="" />
         <span class="title">{{ item.title || item.url }}</span>
+        <span v-if="shortHost(item.url)" class="host">{{ shortHost(item.url) }}</span>
         <span class="time">{{ formatTime(item.lastVisitTime) }}</span>
       </div>
     </template>
 
     <div v-if="flatRows.length === 0" class="empty">
-      {{ isSearching ? 'No matching results.' : 'Type to search…' }}
+      <div class="empty-head">
+        {{ isSearching ? 'No matching results' : 'Ready to search' }}
+      </div>
+      <div class="empty-sub">
+        {{
+          isSearching
+            ? 'Check spelling or try searching by site domain.'
+            : 'Type any title or URL to search open tabs, bookmarks, and history.'
+        }}
+      </div>
     </div>
   </div>
 </template>
@@ -340,28 +391,38 @@ function formatTime(ms?: number): string {
 .list-view {
   flex: 1;
   overflow-y: auto;
-  padding: 4px 0 12px;
+  padding: 4px 0 14px;
 }
 
 .section-label {
-  padding: 8px 10px 4px;
-  font-size: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 12px 4px;
+  font-size: 11.5px;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   color: var(--text-muted);
 }
 
+.section-count {
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+
 .row {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   height: var(--tab-h);
-  padding: 0 8px;
-  margin: 1px 4px;
-  border-radius: 6px;
+  padding: 0 9px;
+  margin: 1px 6px;
+  border-radius: 7px;
   cursor: pointer;
   user-select: none;
+  transition: background-color 0.1s ease;
 }
 
 .row:hover {
@@ -370,11 +431,22 @@ function formatTime(ms?: number): string {
 
 .row.active {
   background: var(--bg-active);
-  font-weight: 500;
 }
 
-.row.discarded {
-  opacity: 0.58;
+.row.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 5px;
+  bottom: 5px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
+
+.row.discarded .title,
+.row.discarded .fav {
+  opacity: 0.56;
 }
 
 .row.search-focus {
@@ -398,9 +470,6 @@ function formatTime(ms?: number): string {
 .fav-fallback {
   width: var(--icon-size);
   height: var(--icon-size);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   color: var(--text-muted);
   flex-shrink: 0;
 }
@@ -413,39 +482,57 @@ function formatTime(ms?: number): string {
   white-space: nowrap;
 }
 
+.host {
+  font-size: 11px;
+  color: var(--text-muted);
+  max-width: 115px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .group-chip {
+  --chip-color: var(--accent);
   display: inline-flex;
   align-items: center;
-  gap: 4px;
   flex-shrink: 0;
   font-size: 11px;
-  padding: 0 6px;
-  height: 18px;
-  border-radius: 99px;
-  background: var(--bg-subtle);
-  color: var(--text-muted);
+  font-weight: 500;
+  padding: 0 7px;
+  height: 19px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--chip-color) 70%, var(--border));
+  background: color-mix(in srgb, var(--chip-color) 10%, var(--surface));
+  color: var(--text);
   max-width: 110px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.chip-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
 .time {
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
   color: var(--text-muted);
   flex-shrink: 0;
 }
 
 .empty {
-  padding: 28px 16px;
+  padding: 36px 20px;
   text-align: center;
   color: var(--text-muted);
+}
+
+.empty-head {
+  font-weight: 600;
+  font-size: 13.5px;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+
+.empty-sub {
+  font-size: 12px;
+  line-height: 1.45;
 }
 </style>

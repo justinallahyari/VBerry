@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "VBerry",
-  "version": "6.5.2",
+  "version": "6.6.0",
   "description": "Vertical tab trees, Tab Groups, instant Quick Search across tabs, bookmarks, and history, plus tab snapshots.",
   "incognito": "split",
   "icons": {
@@ -48,6 +48,10 @@
   },
   "commands": {
     "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+Space",
+        "mac": "MacCtrl+Space"
+      },
       "description": "Open Quick Search"
     },
     "toggle_side_panel": {
@@ -58,10 +62,6 @@
       "description": "Toggle VBerry Side Panel"
     },
     "new_tab_in_panel": {
-      "suggested_key": {
-        "default": "Ctrl+Space",
-        "mac": "MacCtrl+Space"
-      },
       "description": "Open new tab in active group"
     },
     "create_snapshot": {

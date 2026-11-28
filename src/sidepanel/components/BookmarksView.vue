@@ -50,14 +50,17 @@ const dragOverId = ref<string | null>(null)
 const dragPosition = ref<BookmarkDropPosition | null>(null)
 let hoverExpandTimer: ReturnType<typeof setTimeout> | undefined
 let revealTimer: ReturnType<typeof setTimeout> | undefined
+let searchSeq = 0
 
 async function runSearch(q: string) {
+  const seq = ++searchSeq
   const trimmed = q.trim()
   if (!trimmed) {
     searchResults.value = []
     return
   }
   const hits = await searchNonTrashBookmarks(trimmed)
+  if (seq !== searchSeq) return
   const links = hits.filter(h => Boolean(h.url))
   searchResults.value = rankSearchItems(links, trimmed, h => ({
     title: h.title,
@@ -76,7 +79,6 @@ async function load() {
 function flatten(nodes: chrome.bookmarks.BookmarkTreeNode[], level = 0): FlatBookmark[] {
   const out: FlatBookmark[] = []
   for (const n of nodes) {
-    // Skip synthetic root node (id === '0')
     if (n.id === '0') {
       if (n.children) out.push(...flatten(n.children, 0))
       continue
@@ -97,6 +99,16 @@ const allFolderIds = computed(() => collectBookmarkFolders(tree.value).map(f => 
 const allExpanded = computed(
   () => allFolderIds.value.length > 0 && allFolderIds.value.every(id => expanded.value.has(id))
 )
+
+function shortHost(rawUrl?: string): string {
+  if (!rawUrl) return ''
+  try {
+    const u = new URL(rawUrl)
+    return u.protocol === 'http:' || u.protocol === 'https:' ? u.hostname.replace(/^www\./, '') : ''
+  } catch {
+    return ''
+  }
+}
 
 function getDefaultFolderId(): string {
   const folders = collectBookmarkFolders(tree.value)
@@ -210,7 +222,6 @@ function onDragOver(e: DragEvent, target: FlatBookmark) {
   dragOverId.value = target.node.id
   dragPosition.value = pos
 
-  // Auto-expand collapsed folders while hovering over them during a drag
   if (pos === 'into' && target.isFolder && !expanded.value.has(target.node.id)) {
     const folderId = target.node.id
     clearTimeout(hoverExpandTimer)
@@ -329,27 +340,54 @@ onUnmounted(() => {
       <button
         type="button"
         class="tb-btn"
-        title="Add new bookmark"
+        title="Add a new bookmark"
         @click="emit('addBookmark', getDefaultFolderId())"
       >
-        + Bookmark
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path
+            d="M8 3v10M3 8h10"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+          />
+        </svg>
+        <span>Bookmark</span>
       </button>
       <button
         v-if="canBookmarkActiveTab"
         type="button"
         class="tb-btn"
-        title="Bookmark active tab"
+        title="Save the current tab to bookmarks"
         @click="emit('bookmarkActiveTab', getDefaultFolderId())"
       >
-        + Tab
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path
+            d="M4.5 2.5h7a1 1 0 0 1 1 1v10L8 11l-4.5 2.5v-10a1 1 0 0 1 1-1Z"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.45"
+            stroke-linejoin="round"
+          />
+        </svg>
+        <span>Save tab</span>
       </button>
       <button
         type="button"
         class="tb-btn"
-        title="Create new folder"
+        title="Create a new bookmark folder"
         @click="emit('addFolder', getDefaultFolderId())"
       >
-        + Folder
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path
+            d="M2 4.5a1 1 0 0 1 1-1h3.2l1.3 1.5H13a1 1 0 0 1 1 1v5.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1Z"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.45"
+            stroke-linejoin="round"
+          />
+        </svg>
+        <span>Folder</span>
       </button>
       <button
         type="button"
@@ -357,7 +395,26 @@ onUnmounted(() => {
         :title="allExpanded ? 'Collapse all folders' : 'Expand all folders'"
         @click="allExpanded ? collapseAll() : expandAll()"
       >
-        {{ allExpanded ? '▴' : '▾' }}
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path
+            v-if="allExpanded"
+            d="m4.5 10.5 3.5-3.5 3.5 3.5M4.5 6h7"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <path
+            v-else
+            d="m4.5 5.5 3.5 3.5 3.5-3.5M4.5 11.5h7"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
       </button>
     </div>
 
@@ -367,7 +424,9 @@ onUnmounted(() => {
       @contextmenu.self.prevent="emit('panelContextMenu', $event)"
     >
       <template v-if="query.trim()">
-        <div v-if="searchResults.length === 0" class="empty">No matching bookmarks.</div>
+        <div v-if="searchResults.length === 0" class="empty">
+          No bookmarks match “{{ query.trim() }}”.
+        </div>
         <div
           v-for="(item, idx) in searchResults"
           :key="item.id"
@@ -382,6 +441,7 @@ onUnmounted(() => {
         >
           <img class="fav" :src="getChromeFaviconUrl(item.url, 32)" alt="" />
           <span class="title">{{ item.title || item.url }}</span>
+          <span v-if="shortHost(item.url)" class="host">{{ shortHost(item.url) }}</span>
           <button
             type="button"
             tabindex="-1"
@@ -390,7 +450,15 @@ onUnmounted(() => {
             @mousedown.stop
             @click.stop="emit('editBookmark', item)"
           >
-            ✎
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path
+                d="M11.4 2.6a1.4 1.4 0 0 1 2 2L5.5 12.5 2.5 13.5l1-3Z"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.4"
+                stroke-linejoin="round"
+              />
+            </svg>
           </button>
           <button
             type="button"
@@ -400,7 +468,15 @@ onUnmounted(() => {
             @mousedown.stop
             @click.stop="deleteBookmark(item)"
           >
-            ×
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path
+                d="M4 4l8 8M12 4l-8 8"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.65"
+                stroke-linecap="round"
+              />
+            </svg>
           </button>
         </div>
       </template>
@@ -413,6 +489,7 @@ onUnmounted(() => {
           :data-bm-id="item.node.id"
           class="row"
           :class="{
+            'is-folder': item.isFolder,
             'search-focus': activeIndex === idx,
             revealed: revealedId === item.node.id,
             dragging: draggingId === item.node.id,
@@ -420,7 +497,7 @@ onUnmounted(() => {
             'drop-into': dragOverId === item.node.id && dragPosition === 'into',
             'drop-after': dragOverId === item.node.id && dragPosition === 'after',
           }"
-          :style="{ paddingLeft: `${8 + item.level * 14}px` }"
+          :style="{ paddingLeft: `${8 + item.level * 15}px` }"
           :draggable="!item.isRoot"
           :title="item.node.url || item.node.title"
           @click="
@@ -439,20 +516,54 @@ onUnmounted(() => {
           @dragend="clearDragState"
         >
           <span v-if="item.isFolder" class="folder-icon">
-            {{ expanded.has(item.node.id) ? '▾ 📁' : '▸ 📁' }}
+            <svg
+              class="folder-chev"
+              :class="{ open: expanded.has(item.node.id) }"
+              viewBox="0 0 16 16"
+              aria-hidden="true"
+            >
+              <path
+                d="m6 4 4 4-4 4"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.7"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+            <svg class="folder-glyph" viewBox="0 0 16 16" aria-hidden="true">
+              <path
+                d="M2 4.5a1 1 0 0 1 1-1h3.2l1.3 1.5H13a1 1 0 0 1 1 1v5.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1Z"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.45"
+                stroke-linejoin="round"
+              />
+            </svg>
           </span>
           <img v-else class="fav" :src="getChromeFaviconUrl(item.node.url, 32)" alt="" />
           <span class="title">{{ item.node.title || item.node.url || 'Untitled' }}</span>
+          <span v-if="!item.isFolder && shortHost(item.node.url)" class="host">
+            {{ shortHost(item.node.url) }}
+          </span>
           <template v-if="!item.isRoot">
             <button
               type="button"
               tabindex="-1"
               class="row-btn"
-              :title="item.isFolder ? 'Edit / Move folder' : 'Edit bookmark'"
+              :title="item.isFolder ? 'Edit or move folder' : 'Edit bookmark'"
               @mousedown.stop
               @click.stop="emit('editBookmark', item.node)"
             >
-              ✎
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path
+                  d="M11.4 2.6a1.4 1.4 0 0 1 2 2L5.5 12.5 2.5 13.5l1-3Z"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.4"
+                  stroke-linejoin="round"
+                />
+              </svg>
             </button>
             <button
               type="button"
@@ -462,7 +573,15 @@ onUnmounted(() => {
               @mousedown.stop
               @click.stop="deleteBookmark(item.node)"
             >
-              ×
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path
+                  d="M4 4l8 8M12 4l-8 8"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.65"
+                  stroke-linecap="round"
+                />
+              </svg>
             </button>
           </template>
         </div>
@@ -482,27 +601,43 @@ onUnmounted(() => {
 .bm-toolbar {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 5px 8px;
+  gap: 5px;
+  padding: 6px 8px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-subtle);
 }
 
 .tb-btn {
-  height: 24px;
-  padding: 0 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 25px;
+  padding: 0 8px;
   border: 1px solid var(--border);
-  border-radius: 5px;
-  background: var(--bg);
+  border-radius: 6px;
+  background: var(--surface);
   color: var(--text);
   font-size: 11.5px;
+  font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
+  transition: background-color 0.1s ease, border-color 0.1s ease;
+}
+
+.tb-btn svg {
+  width: 12.5px;
+  height: 12.5px;
+  color: var(--text-muted);
+  flex-shrink: 0;
 }
 
 .tb-btn:hover {
   background: var(--bg-hover);
-  border-color: var(--accent);
+  border-color: var(--border-strong);
+}
+
+.tb-btn:hover svg {
+  color: var(--accent);
 }
 
 .tb-btn:focus-visible {
@@ -513,7 +648,6 @@ onUnmounted(() => {
 .tb-icon {
   margin-left: auto;
   padding: 0 6px;
-  color: var(--text-muted);
 }
 
 .list-view {
@@ -528,10 +662,15 @@ onUnmounted(() => {
   gap: 6px;
   height: var(--tab-h);
   padding-right: 6px;
-  margin: 1px 4px;
-  border-radius: 6px;
+  margin: 1px 6px;
+  border-radius: 7px;
   cursor: pointer;
   user-select: none;
+  transition: background-color 0.1s ease;
+}
+
+.row.is-folder .title {
+  font-weight: 500;
 }
 
 .row:hover {
@@ -563,9 +702,27 @@ onUnmounted(() => {
 }
 
 .folder-icon {
-  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   color: var(--text-muted);
   flex-shrink: 0;
+}
+
+.folder-chev {
+  width: 11px;
+  height: 11px;
+  transition: transform 0.12s ease;
+}
+
+.folder-chev.open {
+  transform: rotate(90deg);
+}
+
+.folder-glyph {
+  width: var(--icon-size);
+  height: var(--icon-size);
+  color: var(--accent);
 }
 
 .fav {
@@ -583,43 +740,62 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
+.host {
+  font-size: 11px;
+  color: var(--text-muted);
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.row:hover .host,
+.row.search-focus .host {
+  display: none;
+}
+
 .row-btn {
-  opacity: 0;
-  border: none;
+  display: none;
+  border: 1px solid transparent;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
   width: 22px;
   height: 22px;
-  border-radius: 4px;
-  font-size: 13px;
-  display: inline-flex;
+  border-radius: 5px;
   align-items: center;
   justify-content: center;
   padding: 0;
   flex-shrink: 0;
 }
 
-.row-btn.del {
-  font-size: 15px;
+.row-btn svg {
+  width: 12px;
+  height: 12px;
 }
 
-.row:hover .row-btn {
-  opacity: 1;
+.row:hover .row-btn,
+.row.search-focus .row-btn {
+  display: inline-flex;
 }
 
 .row-btn:hover {
-  background: var(--bg-subtle);
+  background: var(--surface);
+  border-color: var(--border-strong);
   color: var(--text);
 }
 
 .row-btn.del:hover {
   color: var(--danger);
+  border-color: var(--danger-soft);
+  background: var(--danger-soft);
 }
 
 .empty {
-  padding: 24px 16px;
+  padding: 32px 16px;
   text-align: center;
   color: var(--text-muted);
+  font-size: 12.5px;
 }
 </style>

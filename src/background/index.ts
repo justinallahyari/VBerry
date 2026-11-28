@@ -1,4 +1,4 @@
-import type { RuntimeMessage } from '@/shared/types'
+import type { RuntimeMessage, SyncStateMeta } from '@/shared/types'
 import {
   loadSavedPanels,
   loadSettings,
@@ -8,6 +8,7 @@ import {
   updateTreeMeta,
   updateVirtualGroupMap,
 } from '@/shared/storage'
+import { reconcileSync } from '@/shared/sync'
 import { createNewTab, getTargetWindowId } from '@/shared/env'
 import { searchNonTrashBookmarks } from '@/shared/bookmarks'
 import { matchesMoveRule, reparentOnRemove } from '@/shared/tree'
@@ -32,6 +33,7 @@ const MENU_ROOT_ID = 'vberry_send_to_group'
 const MENU_OPEN_SIDEPANEL_ID = 'vberry_action_open_sidepanel'
 const SIDEPANEL_PORT_PREFIX = 'vberry-sidepanel:'
 const openSidePanelPorts = new Map<number, chrome.runtime.Port>()
+const nonNormalWindowIds = new Set<number>()
 let lastFocusedWindowId = -1
 let focusSeq = 0
 
@@ -47,14 +49,27 @@ chrome.runtime.onConnect?.addListener(port => {
   })
 })
 
+chrome.windows?.onCreated?.addListener(win => {
+  if (win.id === undefined || win.id < 0) return
+  if (win.type && win.type !== 'normal') {
+    nonNormalWindowIds.add(win.id)
+  } else if (win.type === 'normal') {
+    nonNormalWindowIds.delete(win.id)
+    if (win.focused) lastFocusedWindowId = win.id
+  }
+})
+
 chrome.windows?.onFocusChanged?.addListener(winId => {
   if (typeof winId !== 'number' || winId < 0) return
   const seq = ++focusSeq
   void chrome.windows
     .get(winId)
     .then(win => {
-      if (seq === focusSeq && win.type === 'normal') {
-        lastFocusedWindowId = winId
+      if (win.type === 'normal') {
+        nonNormalWindowIds.delete(winId)
+        if (seq === focusSeq) lastFocusedWindowId = winId
+      } else {
+        nonNormalWindowIds.add(winId)
       }
     })
     .catch(() => {})
@@ -62,6 +77,7 @@ chrome.windows?.onFocusChanged?.addListener(winId => {
 
 chrome.windows?.onRemoved?.addListener(winId => {
   openSidePanelPorts.delete(winId)
+  nonNormalWindowIds.delete(winId)
   if (lastFocusedWindowId === winId) lastFocusedWindowId = -1
 })
 
@@ -70,12 +86,27 @@ chrome.tabs.onActivated.addListener(info => {
   void chrome.windows
     ?.get?.(info.windowId)
     .then(win => {
-      if (win.focused && win.type === 'normal') {
-        lastFocusedWindowId = info.windowId
+      if (win.type === 'normal') {
+        nonNormalWindowIds.delete(info.windowId)
+        if (win.focused) lastFocusedWindowId = info.windowId
+      } else {
+        nonNormalWindowIds.add(info.windowId)
       }
     })
     .catch(() => {})
 })
+
+function resolveSyncWindowId(tab?: chrome.tabs.Tab): number | undefined {
+  if (
+    tab?.windowId !== undefined &&
+    tab.windowId >= 0 &&
+    !nonNormalWindowIds.has(tab.windowId)
+  ) {
+    lastFocusedWindowId = tab.windowId
+    return tab.windowId
+  }
+  return lastFocusedWindowId >= 0 ? lastFocusedWindowId : undefined
+}
 
 function toggleSidePanelForWindow(winId: number, commandTime = Date.now()): void {
   if (winId < 0) return
@@ -91,7 +122,7 @@ function toggleSidePanelForWindow(winId: number, commandTime = Date.now()): void
   }
   // Must be called synchronously inside user-gesture handler to preserve Chrome's user gesture.
   // If the MV3 service worker restarted while the panel stayed open, open() resolves as a no-op
-  // and the follow-up message closes only a panel mounted before this command.
+  // and the follow-up message closes only a panel visible before this command.
   const openOp = chrome.sidePanel?.open?.({ windowId: winId })
   void Promise.resolve(openOp)
     .catch(() => {})
@@ -103,19 +134,21 @@ function toggleSidePanelForWindow(winId: number, commandTime = Date.now()): void
 }
 
 async function initSidePanelBehavior(): Promise<void> {
-  try {
+  await Promise.allSettled([
     // Toolbar button & _execute_action open the frameless Quick Search default_popup;
     // Side Panel is toggled via Ctrl+E (toggle_side_panel) or right-clicking the toolbar button.
-    await chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: false })
-  } catch {
-    // Some Chromium forks (e.g. Vivaldi) do not implement setPanelBehavior
-  }
-  try {
-    const win = await chrome.windows?.getLastFocused?.({ windowTypes: ['normal'] })
-    if (win?.id !== undefined) lastFocusedWindowId = win.id
-  } catch {
-    // Ignore
-  }
+    chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: false }),
+    // Explicitly register sidepanel.html so Vivaldi's Window store knows the panel URL immediately
+    // on startup before any extension popup or toolbar dropdown is opened.
+    chrome.sidePanel?.setOptions?.({ path: 'sidepanel.html', enabled: true }),
+    chrome.windows
+      ?.getLastFocused?.({ windowTypes: ['normal'] })
+      .then(win => {
+        if (lastFocusedWindowId < 0 && win?.id !== undefined && win.id >= 0) {
+          lastFocusedWindowId = win.id
+        }
+      }),
+  ])
 }
 
 chrome.runtime.onMessage.addListener((msg: RuntimeMessage, _sender, sendResponse) => {
@@ -136,10 +169,25 @@ chrome.runtime.onMessage.addListener((msg: RuntimeMessage, _sender, sendResponse
       .catch(() => sendResponse({ ok: false }))
     return true
   }
+  if (msg.type === 'vberry:sync-now') {
+    clearTimeout(syncReconcileTimer)
+    pendingSyncPullOnly = true
+    void reconcileSync({ forcePush: msg.forcePush })
+      .then(meta =>
+        sendResponse({ ok: !meta.lastError, error: meta.lastError ?? undefined, meta })
+      )
+      .catch(err =>
+        sendResponse({
+          ok: false,
+          error: err instanceof Error ? err.message : 'Could not sync right now.',
+        })
+      )
+    return true
+  }
 })
 
 async function syncAutoSnapshotAlarm(): Promise<void> {
-  const settings = await loadSettings()
+  const settings = await getSettingsCached()
   await chrome.alarms.clear(AUTO_SNAPSHOT_ALARM)
   if (settings.autoSnapshotMinutes > 0) {
     await chrome.alarms.create(AUTO_SNAPSHOT_ALARM, {
@@ -162,6 +210,20 @@ function schedulePersistSession(): void {
   persistSessionTimer = setTimeout(() => {
     void persistCurrentSession()
   }, 400)
+}
+
+let syncReconcileTimer: ReturnType<typeof setTimeout> | undefined
+let pendingSyncPullOnly = true
+function scheduleSyncReconcile(delayMs = 1200, opts?: { pullOnly?: boolean }): void {
+  if (!chrome.storage?.sync) return
+  // Never downgrade a pending full reconcile (e.g. user edit or sync onChanged) to pull-only
+  if (!opts?.pullOnly) pendingSyncPullOnly = false
+  clearTimeout(syncReconcileTimer)
+  syncReconcileTimer = setTimeout(() => {
+    const pullOnly = pendingSyncPullOnly
+    pendingSyncPullOnly = true
+    void reconcileSync(pullOnly ? { pullOnly: true } : undefined)
+  }, delayMs)
 }
 
 let menuBuildSeq = 0
@@ -236,6 +298,12 @@ async function rebuildContextMenus(): Promise<void> {
   }
 }
 
+let cachedSettings: Awaited<ReturnType<typeof loadSettings>> | null = null
+async function getSettingsCached() {
+  if (cachedSettings === null) cachedSettings = await loadSettings()
+  return cachedSettings
+}
+
 let cachedSavedPanels: Awaited<ReturnType<typeof loadSavedPanels>> | null = null
 async function getSavedPanelsCached() {
   if (cachedSavedPanels === null) cachedSavedPanels = await loadSavedPanels()
@@ -247,6 +315,8 @@ function bootstrap(): void {
   void syncAutoSnapshotAlarm()
   void rebuildContextMenus()
   void restorePersistedSessionIfNeeded()
+  // Pull-only on startup so VBerry never overwrites remote data before Vivaldi decrypts sync storage
+  scheduleSyncReconcile(400, { pullOnly: true })
 }
 
 chrome.runtime.onInstalled.addListener(details => {
@@ -263,11 +333,37 @@ void initSidePanelBehavior()
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local') {
-    if (changes[STORAGE_KEYS.settings]) void syncAutoSnapshotAlarm()
+    if (changes[STORAGE_KEYS.settings]) {
+      cachedSettings = null
+      void syncAutoSnapshotAlarm()
+    }
     if (changes[STORAGE_KEYS.savedPanels]) {
       cachedSavedPanels = null
       scheduleContextMenuRebuild()
     }
+    if (changes[STORAGE_KEYS.syncConfig]) {
+      scheduleSyncReconcile(250)
+    } else if (changes[STORAGE_KEYS.syncMeta]) {
+      const nextMeta = changes[STORAGE_KEYS.syncMeta].newValue as Partial<SyncStateMeta> | undefined
+      if (
+        nextMeta &&
+        ((nextMeta.settingsUpdatedAt ?? 0) > (nextMeta.appliedSettingsRev ?? 0) ||
+          (nextMeta.snapshotsUpdatedAt ?? 0) > (nextMeta.appliedSnapshotsRev ?? 0))
+      ) {
+        scheduleSyncReconcile(1200)
+      }
+    } else if (
+      changes[STORAGE_KEYS.snapshots] ||
+      changes[STORAGE_KEYS.settings] ||
+      changes[STORAGE_KEYS.savedPanels]
+    ) {
+      scheduleSyncReconcile(1200)
+    }
+  }
+  if (area === 'sync') {
+    // Full reconcile once browser sync delivers decrypted remote keys: pulls remote changes
+    // and merges/pushes any pending local snapshots or newer edits
+    scheduleSyncReconcile(350)
   }
   if (area === 'session') {
     if (changes[STORAGE_KEYS.treeMeta] || changes[STORAGE_KEYS.virtualGroups]) {
@@ -290,12 +386,15 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   const id = String(info.menuItemId)
   if (id === MENU_OPEN_SIDEPANEL_ID) {
     // Must be called synchronously inside user-gesture handler to preserve Chrome's user gesture
-    const winId =
-      lastFocusedWindowId >= 0 ? lastFocusedWindowId : (tab?.windowId ?? -1)
-    if (winId >= 0) {
+    const winId = resolveSyncWindowId(tab)
+    if (winId !== undefined) {
       void chrome.sidePanel?.open?.({ windowId: winId }).catch(() => {})
     } else if (tab?.id !== undefined) {
       void chrome.sidePanel?.open?.({ tabId: tab.id }).catch(() => {})
+    } else {
+      void chrome.sidePanel
+        ?.open?.({ windowId: chrome.windows?.WINDOW_ID_CURRENT ?? -2 })
+        .catch(() => {})
     }
     return
   }
@@ -324,7 +423,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 
     if (id.startsWith('vberry_saved_')) {
       const savedId = id.replace('vberry_saved_', '')
-      const panels = await loadSavedPanels()
+      const panels = await getSavedPanelsCached()
       const panel = panels.find(p => p.id === savedId)
       if (panel && windowId >= 0) {
         await moveTabsToSavedPanel(windowId, [targetTabId], panel).catch(() => {})
@@ -341,11 +440,22 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 
 // Track parent-child tree hierarchy & inherit group automatically via openerTabId
 chrome.tabs.onCreated.addListener(async tab => {
-  if (tab.id === undefined || tab.pinned || tab.openerTabId === undefined) return
-  const settings = await loadSettings()
+  if (tab.id === undefined || tab.pinned) return
+  const rawUrl = tab.pendingUrl || tab.url || ''
+  if (rawUrl.startsWith('chrome-extension://') && rawUrl.endsWith('/sidepanel.html')) return
+
+  let openerTabId = tab.openerTabId
+  if (openerTabId === undefined) {
+    // Vivaldi attaches `openerTabId` immediately after firing `tabs.onCreated` for extension-created tabs
+    const fresh = await chrome.tabs.get(tab.id).catch(() => undefined)
+    if (!fresh || fresh.pinned || fresh.openerTabId === undefined) return
+    openerTabId = fresh.openerTabId
+  }
+
+  const settings = await getSettingsCached()
 
   try {
-    const opener = await chrome.tabs.get(tab.openerTabId)
+    const opener = await chrome.tabs.get(openerTabId)
     if (opener.pinned || opener.windowId !== tab.windowId) return
 
     if (opener.groupId !== UNGROUPED_ID && tab.groupId === UNGROUPED_ID) {
@@ -390,6 +500,14 @@ chrome.tabs.onMoved.addListener(() => {
   schedulePersistSession()
 })
 
+chrome.tabs.onAttached?.addListener(() => {
+  schedulePersistSession()
+})
+
+chrome.tabs.onDetached?.addListener(() => {
+  schedulePersistSession()
+})
+
 chrome.tabs.onReplaced.addListener(async (addedTabId, removedTabId) => {
   await remapReplacedTabIds(new Map([[removedTabId, addedTabId]]))
   schedulePersistSession()
@@ -417,28 +535,31 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
 // Keyboard commands (synchronous entry point so sidePanel.open keeps Chrome's user gesture)
 chrome.commands.onCommand.addListener((command, tab) => {
-  const syncWinId = lastFocusedWindowId >= 0 ? lastFocusedWindowId : tab?.windowId
+  const syncWinId = resolveSyncWindowId(tab)
 
   if (command === 'toggle_side_panel') {
     const commandTime = Date.now()
-    if (syncWinId !== undefined && syncWinId >= 0) {
+    if (syncWinId !== undefined) {
       toggleSidePanelForWindow(syncWinId, commandTime)
-    } else if (tab?.id !== undefined) {
-      const openOp = chrome.sidePanel?.open?.({ tabId: tab.id })
+    } else {
+      // Any `await` before `sidePanel.open()` expires Chromium's user gesture.
+      // Open synchronously via `tabId` or `WINDOW_ID_CURRENT` (-2), then resolve `winId`
+      // asynchronously only for the post-open close check when the panel was already open.
+      const openOp =
+        tab?.id !== undefined
+          ? chrome.sidePanel?.open?.({ tabId: tab.id })
+          : chrome.sidePanel?.open?.({ windowId: chrome.windows?.WINDOW_ID_CURRENT ?? -2 })
       void Promise.resolve(openOp)
         .catch(() => {})
         .then(async () => {
           const winId = await getTargetWindowId()
           if (winId >= 0) {
+            if (lastFocusedWindowId < 0) lastFocusedWindowId = winId
             chrome.runtime
               .sendMessage({ type: 'vberry:close-panel', windowId: winId, openedBefore: commandTime })
               .catch(() => {})
           }
         })
-    } else {
-      void getTargetWindowId().then(winId => {
-        if (winId >= 0) toggleSidePanelForWindow(winId, commandTime)
-      })
     }
     return
   }
@@ -489,12 +610,16 @@ chrome.omnibox.setDefaultSuggestion({
   description: 'VBerry: Search open tabs and bookmarks',
 })
 
+let omniboxSeq = 0
+
 chrome.omnibox.onInputChanged.addListener(async (text, suggest) => {
+  const seq = ++omniboxSeq
   const q = text.trim().toLowerCase()
   const [tabs, bookmarks] = await Promise.all([
     chrome.tabs.query({}),
     q ? searchNonTrashBookmarks(q) : Promise.resolve([]),
   ])
+  if (seq !== omniboxSeq) return
 
   const results: chrome.omnibox.SuggestResult[] = []
 
@@ -542,7 +667,7 @@ chrome.omnibox.onInputEntered.addListener(async text => {
     const winId = await getTargetWindowId()
     await createNewTab({ windowId: winId >= 0 ? winId : undefined, url, active: true })
   } else {
-    const panels = await loadSavedPanels()
+    const panels = await getSavedPanelsCached()
     const match = panels.find(p => p.title.toLowerCase() === text.trim().toLowerCase())
     if (match) {
       const winId = await getTargetWindowId()

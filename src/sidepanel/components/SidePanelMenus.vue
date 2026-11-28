@@ -54,7 +54,6 @@ async function positionMenu(anchor: { x: number; y: number } | null, elRef: type
 
   let y = anchor.y
   if (anchor.y + rect.height > window.innerHeight - pad) {
-    // Flip upward from the cursor when near the bottom edge, otherwise clamp inside viewport
     y =
       anchor.y - rect.height >= pad
         ? anchor.y - rect.height
@@ -83,41 +82,52 @@ watch(
     v-if="tabMenu"
     ref="tabMenuRef"
     class="ctx-menu"
+    role="menu"
     :style="{ left: `${pos.x}px`, top: `${pos.y}px` }"
     @click.stop
   >
-    <button @click="emit('tabAction', 'new-child')">New Child Tab</button>
-    <button @click="emit('tabAction', 'duplicate')">Duplicate</button>
-    <button @click="emit('tabAction', 'pin')">{{ tabMenu.tab.pinned ? 'Unpin' : 'Pin' }}</button>
-    <button @click="emit('tabAction', 'mute')">
-      {{ tabMenu.tab.mutedInfo?.muted ? 'Unmute' : 'Mute' }}
+    <button type="button" @click="emit('tabAction', 'new-child')">New child tab</button>
+    <button type="button" @click="emit('tabAction', 'duplicate')">Duplicate tab</button>
+    <button type="button" @click="emit('tabAction', 'pin')">
+      {{ tabMenu.tab.pinned ? 'Unpin tab' : 'Pin tab' }}
     </button>
-    <button @click="emit('tabAction', 'discard')">Unload Tab</button>
+    <button type="button" @click="emit('tabAction', 'mute')">
+      {{ tabMenu.tab.mutedInfo?.muted ? 'Unmute tab' : 'Mute tab' }}
+    </button>
+    <button type="button" @click="emit('tabAction', 'discard')">Unload tab</button>
     <hr />
-    <button @click="emit('tabAction', 'indent')">Indent (Make Child)</button>
-    <button @click="emit('tabAction', 'outdent')">Outdent</button>
+    <button type="button" @click="emit('tabAction', 'indent')">Indent under tab above</button>
+    <button type="button" @click="emit('tabAction', 'outdent')">Outdent one level</button>
     <hr />
-    <div class="ctx-label">Move to Group</div>
-    <button @click="emit('tabAction', 'move-group', UNGROUPED_ID)">Ungrouped</button>
+    <div class="ctx-label">Move to group</div>
+    <button type="button" @click="emit('tabAction', 'move-group', UNGROUPED_ID)">
+      <span class="ctx-group-pill" style="--pill-color: var(--accent)">Tabs (ungrouped)</span>
+    </button>
     <button
       v-for="g in groups"
       :key="`ng_${g.id}`"
+      type="button"
       @click="emit('tabAction', 'move-group', g.id)"
     >
-      <span class="ctx-dot" :style="{ background: `var(--grp-${g.color})` }" />
-      {{ g.title || 'Group' }}
+      <span class="ctx-group-pill" :style="{ '--pill-color': `var(--grp-${g.color})` }">
+        {{ g.title || 'Group' }}
+      </span>
     </button>
     <button
       v-for="sp in unmaterializedSavedPanels"
       :key="`sp_${sp.id}`"
+      type="button"
       @click="emit('tabAction', 'move-group', sp)"
     >
-      <span class="ctx-dot" :style="{ background: `var(--grp-${sp.color})` }" />
-      {{ sp.title }}
+      <span class="ctx-group-pill" :style="{ '--pill-color': `var(--grp-${sp.color})` }">
+        {{ sp.title }}
+      </span>
     </button>
     <hr />
-    <button class="danger" @click="emit('tabAction', 'close-branch')">Close Branch</button>
-    <button class="danger" @click="emit('tabAction', 'close')">Close Tab</button>
+    <button type="button" class="danger" @click="emit('tabAction', 'close-branch')">
+      Close branch
+    </button>
+    <button type="button" class="danger" @click="emit('tabAction', 'close')">Close tab</button>
   </div>
 
   <!-- Panel / Group Context Menu -->
@@ -125,40 +135,54 @@ watch(
     v-if="groupMenu"
     ref="groupMenuRef"
     class="ctx-menu"
+    role="menu"
     :style="{ left: `${pos.x}px`, top: `${pos.y}px` }"
     @click.stop
   >
-    <button @click="emit('groupAction', 'new-tab')">New Tab</button>
-    <button @click="emit('groupAction', 'new-group')">New Tab Group…</button>
+    <button type="button" @click="emit('groupAction', 'new-tab')">New tab</button>
+    <button type="button" @click="emit('groupAction', 'new-group')">New tab group…</button>
     <template v-if="groupMenu.kind !== 'ungrouped'">
       <hr />
-      <button @click="emit('groupAction', 'edit')">Rename / Change Color…</button>
-      <button v-if="groupMenu.kind === 'native'" @click="emit('groupAction', 'toggle-collapse')">
-        {{ groupMenu.group.collapsed ? 'Expand in Tab Strip' : 'Collapse in Tab Strip' }}
+      <button type="button" @click="emit('groupAction', 'edit')">Edit group…</button>
+      <button
+        v-if="groupMenu.kind === 'native'"
+        type="button"
+        @click="emit('groupAction', 'toggle-collapse')"
+      >
+        {{ groupMenu.group.collapsed ? 'Expand in browser tab bar' : 'Collapse in browser tab bar' }}
       </button>
     </template>
     <hr />
-    <button @click="emit('groupAction', 'expand-all')">Expand All Branches</button>
-    <button @click="emit('groupAction', 'collapse-all')">Collapse All Branches</button>
-    <button @click="emit('groupAction', 'sort-title')">Sort Tabs by Title</button>
-    <button @click="emit('groupAction', 'sort-url')">Sort Tabs by URL</button>
-    <button @click="emit('groupAction', 'dedupe')">Close Duplicate Tabs</button>
-    <hr />
-    <button @click="emit('groupAction', 'discard')">Unload Inactive Tabs</button>
-    <button @click="emit('groupAction', 'mute-all')">Toggle Mute All Tabs</button>
-    <button @click="emit('groupAction', 'bookmark')">Bookmark All Tabs</button>
-    <button @click="emit('groupAction', 'snapshot')">Take Snapshot</button>
-    <hr />
-    <button v-if="groupMenu.kind !== 'ungrouped'" @click="emit('groupAction', 'ungroup')">
-      Ungroup All Tabs
+    <button type="button" @click="emit('groupAction', 'expand-all')">Expand all branches</button>
+    <button type="button" @click="emit('groupAction', 'collapse-all')">
+      Collapse all branches
     </button>
-    <button class="danger" @click="emit('groupAction', 'close-all')">Close All Tabs</button>
+    <button type="button" @click="emit('groupAction', 'sort-title')">Sort tabs by title</button>
+    <button type="button" @click="emit('groupAction', 'sort-url')">Sort tabs by URL</button>
+    <button type="button" @click="emit('groupAction', 'dedupe')">Close duplicate tabs</button>
+    <hr />
+    <button type="button" @click="emit('groupAction', 'discard')">Unload inactive tabs</button>
+    <button type="button" @click="emit('groupAction', 'mute-all')">Mute or unmute all tabs</button>
+    <button type="button" @click="emit('groupAction', 'bookmark')">Bookmark all tabs</button>
+    <button type="button" @click="emit('groupAction', 'snapshot')">Save snapshot</button>
+    <hr />
+    <button
+      v-if="groupMenu.kind !== 'ungrouped'"
+      type="button"
+      @click="emit('groupAction', 'ungroup')"
+    >
+      Ungroup tabs
+    </button>
+    <button type="button" class="danger" @click="emit('groupAction', 'close-all')">
+      Close all tabs
+    </button>
     <button
       v-if="groupMenu.kind === 'saved'"
+      type="button"
       class="danger"
       @click="emit('groupAction', 'delete-panel')"
     >
-      Delete Panel
+      Delete saved group
     </button>
   </div>
 
@@ -167,6 +191,7 @@ watch(
     v-if="itemMenu"
     ref="itemMenuRef"
     class="ctx-menu"
+    role="menu"
     :style="{ left: `${pos.x}px`, top: `${pos.y}px` }"
     @click.stop
   >
@@ -178,104 +203,147 @@ watch(
         itemMenu.kind === 'snapshot-tab'
       "
     >
-      <button v-if="itemMenu.kind === 'session'" @click="emit('itemAction', 'restore-session')">
-        Restore Tab
+      <button
+        v-if="itemMenu.kind === 'session'"
+        type="button"
+        @click="emit('itemAction', 'restore-session')"
+      >
+        Reopen closed tab
       </button>
-      <button @click="emit('itemAction', 'open')">Open</button>
-      <button @click="emit('itemAction', 'open-bg')">Open in Background</button>
+      <button type="button" @click="emit('itemAction', 'open')">Open</button>
+      <button type="button" @click="emit('itemAction', 'open-bg')">Open in background</button>
       <hr />
-      <div class="ctx-label">Open in Tab Group</div>
-      <button @click="emit('itemAction', 'open-in-group', UNGROUPED_ID)">Ungrouped</button>
+      <div class="ctx-label">Open in group</div>
+      <button type="button" @click="emit('itemAction', 'open-in-group', UNGROUPED_ID)">
+        <span class="ctx-group-pill" style="--pill-color: var(--accent)">Tabs (ungrouped)</span>
+      </button>
       <button
         v-for="g in groups"
         :key="`ig_${g.id}`"
+        type="button"
         @click="emit('itemAction', 'open-in-group', g.id)"
       >
-        <span class="ctx-dot" :style="{ background: `var(--grp-${g.color})` }" />
-        {{ g.title || 'Group' }}
+        <span class="ctx-group-pill" :style="{ '--pill-color': `var(--grp-${g.color})` }">
+          {{ g.title || 'Group' }}
+        </span>
       </button>
       <button
         v-for="sp in unmaterializedSavedPanels"
         :key="`isp_${sp.id}`"
+        type="button"
         @click="emit('itemAction', 'open-in-group', sp)"
       >
-        <span class="ctx-dot" :style="{ background: `var(--grp-${sp.color})` }" />
-        {{ sp.title }}
+        <span class="ctx-group-pill" :style="{ '--pill-color': `var(--grp-${sp.color})` }">
+          {{ sp.title }}
+        </span>
       </button>
       <hr />
       <template v-if="itemMenu.kind === 'bookmark'">
-        <button @click="emit('itemAction', 'edit-bookmark')">Edit Bookmark…</button>
-        <button @click="emit('itemAction', 'move-bookmark')">Move to Folder…</button>
-        <button @click="emit('itemAction', 'add-bookmark-below')">Add Bookmark Below…</button>
-        <button v-if="itemMenu.fromSearch" @click="emit('itemAction', 'reveal-bookmark')">
-          Reveal in Tree
+        <button type="button" @click="emit('itemAction', 'edit-bookmark')">Edit bookmark…</button>
+        <button type="button" @click="emit('itemAction', 'move-bookmark')">Move to folder…</button>
+        <button type="button" @click="emit('itemAction', 'add-bookmark-below')">
+          Add bookmark below…
+        </button>
+        <button
+          v-if="itemMenu.fromSearch"
+          type="button"
+          @click="emit('itemAction', 'reveal-bookmark')"
+        >
+          Show in folder
         </button>
       </template>
-      <button @click="emit('itemAction', 'copy-url')">Copy URL</button>
+      <button type="button" @click="emit('itemAction', 'copy-url')">Copy link</button>
       <template v-if="itemMenu.kind === 'bookmark'">
         <hr />
-        <button class="danger" @click="emit('itemAction', 'delete-bookmark')">
-          Delete Bookmark
+        <button type="button" class="danger" @click="emit('itemAction', 'delete-bookmark')">
+          Delete bookmark
         </button>
       </template>
       <button
         v-if="itemMenu.kind === 'history'"
+        type="button"
         class="danger"
         @click="emit('itemAction', 'delete-history')"
       >
-        Delete from History
+        Remove from history
       </button>
     </template>
 
     <template v-else-if="itemMenu.kind === 'bookmark' && !itemMenu.node.url">
-      <button @click="emit('itemAction', 'open-folder-tabs')">Open All in New Tabs</button>
-      <button @click="emit('itemAction', 'open-folder-group')">Open All as Tab Group</button>
-      <hr />
-      <button @click="emit('itemAction', 'add-bookmark-in-folder')">Add Bookmark Here…</button>
-      <button @click="emit('itemAction', 'bookmark-active-in-folder')">
-        Bookmark Active Tab Here
+      <button type="button" @click="emit('itemAction', 'open-folder-tabs')">
+        Open all in new tabs
       </button>
-      <button @click="emit('itemAction', 'add-subfolder')">New Subfolder…</button>
+      <button type="button" @click="emit('itemAction', 'open-folder-group')">
+        Open all as tab group
+      </button>
       <hr />
-      <button @click="emit('itemAction', 'sort-folder-title')">Sort by Title</button>
-      <button @click="emit('itemAction', 'sort-folder-url')">Sort by URL</button>
+      <button type="button" @click="emit('itemAction', 'add-bookmark-in-folder')">
+        Add bookmark here…
+      </button>
+      <button type="button" @click="emit('itemAction', 'bookmark-active-in-folder')">
+        Save current tab here
+      </button>
+      <button type="button" @click="emit('itemAction', 'add-subfolder')">New subfolder…</button>
+      <hr />
+      <button type="button" @click="emit('itemAction', 'sort-folder-title')">Sort by title</button>
+      <button type="button" @click="emit('itemAction', 'sort-folder-url')">Sort by URL</button>
       <template v-if="itemMenu.node.parentId && itemMenu.node.parentId !== '0'">
         <hr />
-        <button @click="emit('itemAction', 'edit-folder')">Rename / Move Folder…</button>
-        <button class="danger" @click="emit('itemAction', 'delete-bookmark')">Delete Folder</button>
+        <button type="button" @click="emit('itemAction', 'edit-folder')">
+          Edit or move folder…
+        </button>
+        <button type="button" class="danger" @click="emit('itemAction', 'delete-bookmark')">
+          Delete folder
+        </button>
       </template>
     </template>
 
     <template v-else-if="itemMenu.kind === 'bookmark-panel'">
-      <button @click="emit('itemAction', 'add-bookmark-root')">Add Bookmark…</button>
-      <button @click="emit('itemAction', 'bookmark-active-root')">Bookmark Active Tab</button>
-      <button @click="emit('itemAction', 'add-folder-root')">New Folder…</button>
+      <button type="button" @click="emit('itemAction', 'add-bookmark-root')">Add bookmark…</button>
+      <button type="button" @click="emit('itemAction', 'bookmark-active-root')">
+        Save current tab
+      </button>
+      <button type="button" @click="emit('itemAction', 'add-folder-root')">New folder…</button>
       <hr />
-      <button @click="emit('itemAction', 'expand-all-folders')">Expand All Folders</button>
-      <button @click="emit('itemAction', 'collapse-all-folders')">Collapse All Folders</button>
+      <button type="button" @click="emit('itemAction', 'expand-all-folders')">
+        Expand all folders
+      </button>
+      <button type="button" @click="emit('itemAction', 'collapse-all-folders')">
+        Collapse all folders
+      </button>
     </template>
 
     <template v-else-if="itemMenu.kind === 'snapshot'">
-      <button @click="emit('itemAction', 'snap-restore-new')">Restore in New Window</button>
-      <button @click="emit('itemAction', 'snap-restore-here')">Restore in Current Window</button>
-      <button @click="emit('itemAction', 'snap-export-md')">Export Markdown</button>
+      <button type="button" @click="emit('itemAction', 'snap-restore-new')">
+        Restore in new window
+      </button>
+      <button type="button" @click="emit('itemAction', 'snap-restore-here')">
+        Restore in current window
+      </button>
+      <button type="button" @click="emit('itemAction', 'snap-export-md')">Export Markdown</button>
       <hr />
-      <button class="danger" @click="emit('itemAction', 'snap-delete')">Delete Snapshot</button>
+      <button type="button" class="danger" @click="emit('itemAction', 'snap-delete')">
+        Delete snapshot
+      </button>
     </template>
 
     <template v-else-if="itemMenu.kind === 'session'">
-      <button @click="emit('itemAction', 'restore-session')">Restore Window</button>
+      <button type="button" @click="emit('itemAction', 'restore-session')">Reopen window</button>
     </template>
 
     <template v-else-if="itemMenu.kind === 'snapshot-window'">
-      <button @click="emit('itemAction', 'snap-restore-window-new')">
-        Restore Window in New Window
+      <button type="button" @click="emit('itemAction', 'snap-restore-window-new')">
+        Restore in new window
       </button>
-      <button @click="emit('itemAction', 'snap-restore-window-here')">Restore Window Here</button>
+      <button type="button" @click="emit('itemAction', 'snap-restore-window-here')">
+        Restore in current window
+      </button>
     </template>
 
     <template v-else-if="itemMenu.kind === 'snapshot-group'">
-      <button @click="emit('itemAction', 'snap-restore-group')">Restore Group Here</button>
+      <button type="button" @click="emit('itemAction', 'snap-restore-group')">
+        Restore group here
+      </button>
     </template>
   </div>
 </template>
@@ -283,13 +351,13 @@ watch(
 <style scoped>
 .ctx-menu {
   position: fixed;
-  min-width: 175px;
-  max-height: 80vh;
+  min-width: 190px;
+  max-height: 82vh;
   overflow-y: auto;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  padding: 5px;
   box-shadow: var(--shadow);
   z-index: 50;
   display: flex;
@@ -299,43 +367,60 @@ watch(
 .ctx-menu button {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   width: 100%;
-  padding: 5px 8px;
+  padding: 5.5px 9px;
   border: none;
-  border-radius: 5px;
+  border-radius: 6px;
   background: transparent;
   text-align: left;
   cursor: pointer;
   font-size: 12.5px;
+  transition: background-color 0.08s ease;
 }
 
-.ctx-menu button:hover {
+.ctx-menu button:hover,
+.ctx-menu button:focus-visible {
   background: var(--bg-hover);
+  outline: none;
 }
 
 .ctx-menu button.danger {
   color: var(--danger);
 }
 
+.ctx-menu button.danger:hover,
+.ctx-menu button.danger:focus-visible {
+  background: var(--danger-soft);
+}
+
 .ctx-menu hr {
   border: none;
   border-top: 1px solid var(--border);
-  margin: 4px 0;
+  margin: 4px 2px;
 }
 
 .ctx-label {
-  padding: 3px 8px;
-  font-size: 10.5px;
+  padding: 4px 9px 2px;
+  font-size: 11px;
   font-weight: 600;
-  text-transform: uppercase;
   color: var(--text-muted);
 }
 
-.ctx-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
+.ctx-group-pill {
+  --pill-color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--pill-color) 70%, var(--border));
+  background: color-mix(in srgb, var(--pill-color) 10%, var(--surface));
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

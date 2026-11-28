@@ -42,8 +42,44 @@ export interface SavedPanel {
 
 type PopupDefaultView = 'search' | 'tabs' | 'bookmarks' | 'history' | 'snapshots'
 
+export type AutoThemeId = 'auto' | 'vivaldi' | 'chrome'
+
+export type PresetThemeId =
+  | 'vivaldi-light'
+  | 'vivaldi-dark'
+  | 'chrome-light'
+  | 'chrome-dark'
+  | 'light'
+  | 'dark'
+  | 'paper'
+  | 'dawn'
+  | 'nordic'
+  | 'pine'
+  | 'tokyo'
+  | 'espresso'
+
+export type ThemeId = AutoThemeId | PresetThemeId | string
+
+export interface ThemeColors {
+  scheme: 'light' | 'dark'
+  bg: string
+  surface: string
+  bgSubtle: string
+  border: string
+  text: string
+  textMuted: string
+  defaultAccent: string
+}
+
+export interface CustomTheme extends ThemeColors {
+  id: string
+  name: string
+}
+
 export interface Settings {
-  theme: 'auto' | 'light' | 'dark'
+  theme: ThemeId
+  customThemes: CustomTheme[]
+  themeOverrides: Record<string, Partial<ThemeColors>>
   density: 'compact' | 'comfortable'
   browserMode: 'auto' | 'chrome' | 'vivaldi'
   popupDefaultView: PopupDefaultView
@@ -79,6 +115,8 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
   theme: 'auto',
+  customThemes: [],
+  themeOverrides: {},
   density: 'comfortable',
   browserMode: 'auto',
   popupDefaultView: 'search',
@@ -158,6 +196,32 @@ export interface VBerrySnapshot {
   windows: SnapshotWindow[]
 }
 
+export interface SyncConfig {
+  enabled: boolean
+  syncSettings: boolean
+  syncSnapshots: boolean
+}
+
+export const DEFAULT_SYNC_CONFIG: SyncConfig = {
+  enabled: true,
+  syncSettings: true,
+  syncSnapshots: true,
+}
+
+export interface SyncStateMeta {
+  deviceId: string
+  settingsUpdatedAt: number
+  snapshotsUpdatedAt: number
+  appliedSettingsRev: number
+  appliedSnapshotsRev: number
+  deletedSnapshotIds: string[]
+  lastSyncedAt: number | null
+  lastError: string | null
+  bytesInUse: number
+  syncedSnapshotCount: number
+  totalSnapshotCount: number
+}
+
 export type ActiveView =
   | { kind: 'ungrouped' }
   | { kind: 'group'; groupId: number }
@@ -172,3 +236,4 @@ export type RuntimeMessage =
   | { type: 'vberry:close-panel'; windowId: number; openedBefore?: number }
   | { type: 'vberry:restore-snapshot'; snapshot: VBerrySnapshot; inNewWindow: boolean }
   | { type: 'vberry:discard-tabs'; tabIds: number[]; windowId: number }
+  | { type: 'vberry:sync-now'; forcePush?: boolean }

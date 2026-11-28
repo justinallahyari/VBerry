@@ -10,6 +10,7 @@ import {
 import {
   loadInitialSidepanelState,
   loadVirtualGroupMap,
+  normalizeSettings,
   STORAGE_KEYS,
   toArray,
 } from '@/shared/storage'
@@ -21,6 +22,7 @@ import {
   UNGROUPED_ID,
 } from '@/shared/groups'
 import { restorePersistedSessionIfNeeded } from '@/shared/session-state'
+import { applyVisualTheme } from '@/shared/themes'
 
 type TabPanelView =
   | { kind: 'ungrouped' }
@@ -57,8 +59,7 @@ export function resolvePopupInitialView(
 
 function applyThemeAndCss(s: Settings): void {
   const root = document.documentElement
-  if (s.theme === 'auto') root.removeAttribute('data-theme')
-  else root.setAttribute('data-theme', s.theme)
+  applyVisualTheme(s, root)
   root.setAttribute('data-density', s.density)
   root.style.setProperty('--font-size', `${s.fontSize}px`)
   root.style.setProperty('--icon-size', `${s.iconSize}px`)
@@ -102,7 +103,9 @@ export function useChromeWindow(hooks: {
   let refreshTimer: ReturnType<typeof setTimeout> | undefined
   let activeRetryTimers: ReturnType<typeof setTimeout>[] = []
   let refreshSeq = 0
-  const mountedAt = Date.now()
+  const isDocHidden = () =>
+    typeof document !== 'undefined' && document.visibilityState === 'hidden'
+  let visibleSince = isDocHidden() ? Infinity : Date.now()
   let panelPort: chrome.runtime.Port | null = null
 
   function clearActiveRetryTimers() {
@@ -325,10 +328,19 @@ export function useChromeWindow(hooks: {
       if (!savedPanels.value.some(p => p.id === sid)) target = { kind: 'ungrouped' }
     }
 
+    const deferActivateInPopup = !background && isPopup
+
     if (target.kind === 'group') {
-      const tab = await createNewTab({ windowId: windowId.value, url, active: !background })
+      const tab = await createNewTab({
+        windowId: windowId.value,
+        url,
+        active: !background && !deferActivateInPopup,
+      })
       if (tab.id !== undefined) {
         await chrome.tabs.group({ tabIds: tab.id, groupId: target.groupId }).catch(() => {})
+        if (deferActivateInPopup) {
+          await chrome.tabs.update(tab.id, { active: true }).catch(() => {})
+        }
       }
       if (!background) await selectView({ kind: 'group', groupId: target.groupId })
       return
@@ -337,12 +349,20 @@ export function useChromeWindow(hooks: {
     if (target.kind === 'saved') {
       const panel = savedPanels.value.find(p => p.id === target.savedId)
       if (panel) {
-        const res = await materializeSavedPanel(windowId.value, panel, url, !background)
+        const res = await materializeSavedPanel(
+          windowId.value,
+          panel,
+          url,
+          !background && !deferActivateInPopup
+        )
         if (res.groupId !== null) {
           if (!background) await selectView({ kind: 'group', groupId: res.groupId })
         } else {
           virtualGroupMap.value = await loadVirtualGroupMap()
           if (!background) await selectView({ kind: 'saved', savedId: res.savedPanelId })
+        }
+        if (deferActivateInPopup && res.tab?.id !== undefined) {
+          await chrome.tabs.update(res.tab.id, { active: true }).catch(() => {})
         }
         return
       }
@@ -362,10 +382,19 @@ export function useChromeWindow(hooks: {
     if (windowId.value < 0) windowId.value = await getTargetWindowId()
     if (windowId.value < 0) return
 
+    const deferActivateInPopup = !background && isPopup && target !== UNGROUPED_ID
+
     if (typeof target === 'number') {
-      const tab = await createNewTab({ windowId: windowId.value, url, active: !background })
+      const tab = await createNewTab({
+        windowId: windowId.value,
+        url,
+        active: !background && !deferActivateInPopup,
+      })
       if (target !== UNGROUPED_ID && tab.id !== undefined) {
         await chrome.tabs.group({ tabIds: tab.id, groupId: target }).catch(() => {})
+        if (deferActivateInPopup) {
+          await chrome.tabs.update(tab.id, { active: true }).catch(() => {})
+        }
         if (!background) await selectView({ kind: 'group', groupId: target })
       } else if (!background) {
         await selectView({ kind: 'ungrouped' })
@@ -373,12 +402,20 @@ export function useChromeWindow(hooks: {
       return
     }
 
-    const res = await materializeSavedPanel(windowId.value, target, url, !background)
+    const res = await materializeSavedPanel(
+      windowId.value,
+      target,
+      url,
+      !background && !deferActivateInPopup
+    )
     if (res.groupId !== null) {
       if (!background) await selectView({ kind: 'group', groupId: res.groupId })
     } else {
       virtualGroupMap.value = await loadVirtualGroupMap()
       if (!background) await selectView({ kind: 'saved', savedId: res.savedPanelId })
+    }
+    if (deferActivateInPopup && res.tab?.id !== undefined) {
+      await chrome.tabs.update(res.tab.id, { active: true }).catch(() => {})
     }
   }
 
@@ -394,11 +431,7 @@ export function useChromeWindow(hooks: {
     }
     if (area === 'local') {
       if (changes[STORAGE_KEYS.settings]) {
-        const raw = changes[STORAGE_KEYS.settings].newValue ?? {}
-        settings.value = {
-          ...DEFAULT_SETTINGS,
-          ...raw,
-        }
+        settings.value = normalizeSettings(changes[STORAGE_KEYS.settings].newValue)
         applyThemeAndCss(settings.value)
         if (
           activeView.value.kind === 'search' &&
@@ -451,8 +484,9 @@ export function useChromeWindow(hooks: {
     if (msg.type === 'vberry:close-panel') {
       if (
         !isPopup &&
+        !isDocHidden() &&
         msg.windowId === windowId.value &&
-        (msg.openedBefore === undefined || mountedAt < msg.openedBefore)
+        (msg.openedBefore === undefined || visibleSince < msg.openedBefore)
       ) {
         window.close()
       }
@@ -463,8 +497,15 @@ export function useChromeWindow(hooks: {
     hooks.onCommand?.(msg.command)
   }
 
+  function disconnectPanelPort() {
+    panelPort?.disconnect()
+    panelPort = null
+  }
+
   function connectPanelPort() {
-    if (isPopup || windowId.value < 0 || panelPort || !chrome.runtime?.connect) return
+    if (isPopup || windowId.value < 0 || panelPort || isDocHidden() || !chrome.runtime?.connect) {
+      return
+    }
     try {
       const port = chrome.runtime.connect({ name: `vberry-sidepanel:${windowId.value}` })
       panelPort = port
@@ -479,12 +520,28 @@ export function useChromeWindow(hooks: {
     }
   }
 
+  function syncPanelPort() {
+    if (isPopup || windowId.value < 0) return
+    if (isDocHidden()) {
+      visibleSince = Infinity
+      disconnectPanelPort()
+      return
+    }
+    if (visibleSince === Infinity) visibleSince = Date.now()
+    connectPanelPort()
+  }
+
+  function onVisibilityChange() {
+    syncPanelPort()
+    if (!isDocHidden()) scheduleRefresh()
+  }
+
   function onWindowFocusChanged() {
     scheduleRefresh()
   }
 
   function onWindowFocus() {
-    connectPanelPort()
+    syncPanelPort()
     scheduleRefresh()
   }
 
@@ -504,7 +561,7 @@ export function useChromeWindow(hooks: {
     if (isPopup) {
       activeView.value = resolvePopupInitialView(settings.value, lastTabView.value)
     } else {
-      connectPanelPort()
+      syncPanelPort()
     }
 
     chrome.tabs.onCreated.addListener(scheduleRefresh)
@@ -526,11 +583,11 @@ export function useChromeWindow(hooks: {
     chrome.storage.onChanged.addListener(onStorageChanged)
     chrome.runtime.onMessage.addListener(onRuntimeMessage)
     window.addEventListener('focus', onWindowFocus)
+    document.addEventListener('visibilitychange', onVisibilityChange)
   })
 
   onUnmounted(() => {
-    panelPort?.disconnect()
-    panelPort = null
+    disconnectPanelPort()
     clearTimeout(refreshTimer)
     clearActiveRetryTimers()
     chrome.tabs.onCreated.removeListener(scheduleRefresh)
@@ -552,6 +609,7 @@ export function useChromeWindow(hooks: {
     chrome.storage.onChanged.removeListener(onStorageChanged)
     chrome.runtime.onMessage.removeListener(onRuntimeMessage)
     window.removeEventListener('focus', onWindowFocus)
+    document.removeEventListener('visibilitychange', onVisibilityChange)
   })
 
   return {

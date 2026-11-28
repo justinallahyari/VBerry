@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildTabTree,
+  computeTabDropIndex,
   getSubtreeIds,
   indentTab,
   matchesMoveRule,
@@ -72,6 +73,23 @@ describe('Tab Tree Engine', () => {
 
     meta = outdentTab(3, meta)
     expect(meta[3]?.parentId).toBeUndefined()
+  })
+
+  it('computes accurate move indices when dragging tabs upward, downward, into, and after subtrees', () => {
+    const flat = [tab(1, 0), tab(2, 1), tab(3, 2), tab(4, 3)]
+    expect(computeTabDropIndex(flat, {}, [1], 3, 'after')).toBe(2)
+    expect(computeTabDropIndex(flat, {}, [1], 3, 'before')).toBe(1)
+    expect(computeTabDropIndex(flat, {}, [4], 2, 'before')).toBe(1)
+    expect(computeTabDropIndex(flat, {}, [4], 2, 'into')).toBe(2)
+
+    // Dragging subtree [1, 2] downward after parent [3, 4] lands at index 2 ([3, 4, 1, 2])
+    const nested: TabTreeMap = { 2: { parentId: 1 }, 4: { parentId: 3 } }
+    expect(computeTabDropIndex(flat, nested, [1, 2], 3, 'after')).toBe(2)
+
+    // Dragging tab 1 after folded parent 2 (whose child 3 is at index 2) skips past child 3 -> index 2
+    const foldedParent: TabTreeMap = { 2: { folded: true }, 3: { parentId: 2 } }
+    expect(computeTabDropIndex(flat, foldedParent, [1], 2, 'after')).toBe(2)
+    expect(computeTabDropIndex(flat, foldedParent, [4], 2, 'after')).toBe(3)
   })
 
   it('matches move rules with regex literals, plain regex, and fallback substring', () => {

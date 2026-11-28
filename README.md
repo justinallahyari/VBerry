@@ -41,9 +41,10 @@
 - **History & Recently Closed**: Quickly search recent browsing history or restore recently closed tabs and windows.
 - **Tree-Preserving Snapshots**: Capture snapshots of your open windows, pinned tabs, groups, and nested tab trees manually or on a schedule. Restore a full window, a single group, or export any snapshot to Markdown.
 
-### Easy Setup, Customization & Backup
+### Easy Setup, Customization, Sync & Backup
 - **Guided First-Run Welcome Page**: Walks you through setting your shortcuts, pinning VBerry to your toolbar, and getting started in under a minute.
-- **Make It Yours**: Switch between Auto, Light, and Dark themes, choose Comfortable or Compact density, resize text and icons, or add Custom Sidebar CSS.
+- **Make It Yours**: Choose **Vivaldi Default** (light/dark), **Chrome Default** (light/dark), **System Auto**, or any of 8 curated studio palettes (*Mineral Slate*, *Warm Paper*, *Coastal Mist*, *Graphite Plum*, *Nordic Frost*, *Evergreen Studio*, *Midnight Indigo*, *Espresso & Brass*)—or customize any palette's colors and create your own synced custom themes right inside Preferences. Matching Vivaldi browser themes are included in [`vivaldi themes/`](./vivaldi%20themes).
+- **Native Account Sync (Chrome & Vivaldi)**: Sync preferences, saved groups & URL rules, and compressed tab snapshots across your computers using your **Google Account** in Google Chrome (`Chrome Settings → Sync`) or your **Vivaldi Account** in Vivaldi (`Vivaldi Settings → Sync` with **Extensions** enabled).
 - **Backup & Import**: Export and restore VBerry backups anytime — or import existing backups and snapshots from [Sidebery](https://github.com/mbnuqw/sidebery) with colors, auto-sorting rules, settings, and custom CSS preserved.
 
 <p align="center">
@@ -56,17 +57,18 @@
 
 ## Install & Use a Release Version
 
-1. Download the latest `vberry-*.zip` file from the [Releases](https://github.com/justinallahyari/VBerry/releases) page and unzip it to a permanent folder on your computer.
-2. Open your browser's Extensions page:
-   - **Chrome**: Go to `chrome://extensions`
-   - **Vivaldi**: Go to `vivaldi://extensions`
-3. Turn on **Developer mode** (top-right corner).
-4. Click **Load unpacked** and select the unzipped VBerry folder.
-5. The **Welcome Guide** opens automatically — use it to pin VBerry and set your shortcuts.
+### Vivaldi (Recommended: `.crx` package)
+1. Download the latest `vberry-*.crx` file from the [Releases](https://github.com/justinallahyari/VBerry/releases) page.
+2. Open `vivaldi://extensions` and turn on **Developer mode** (top-right corner).
+3. Drag and drop the `.crx` file onto the `vivaldi://extensions` page and click **Add extension**.
+4. The **Welcome Guide** opens automatically — use it to review your shortcuts, choose a theme, and enable Vivaldi Account Sync.
+
+### Google Chrome (Unpacked)
+Chrome disables off-store `.crx` packages on macOS/Windows, so build from source below and load the `addon/` folder via `chrome://extensions` → **Developer mode** → **Load unpacked**.
 
 ### Everyday Controls
 
-- **Quick Search**: Left-click the VBerry toolbar icon, or press your **Open Quick Search** shortcut.
+- **Quick Search**: Left-click the VBerry toolbar icon, or press `Ctrl+Space` (`Control+Space` on macOS).
 - **Vertical Sidebar**: Right-click the VBerry toolbar icon and choose **Open VBerry Side Panel**, or press `Ctrl+E` (`Control+E` on macOS).
   - *Vivaldi users*: Click **+** in Vivaldi's sidebar and paste the Web Panel link from VBerry's Welcome Guide (`chrome-extension://<extension-id>/sidepanel.html`) to dock VBerry in your sidebar.
 - **Address Bar Search (Chrome)**: Type `=` followed by `Space` in Chrome's address bar to search open tabs and bookmarks directly.
@@ -78,9 +80,9 @@ Open **VBerry Settings → Set Shortcuts…** (or visit `chrome://extensions/sho
 
 | Action | Suggested / Default |
 | --- | --- |
-| **Open Quick Search** | Bind your favorite key (e.g., `Alt+Space` or `Ctrl+Shift+K`) |
+| **Open Quick Search** | `Ctrl+Space` (`Control+Space` on macOS) |
 | **Toggle VBerry Side Panel** | `Ctrl+E` (`Control+E` on macOS) |
-| **New Tab in Active Group** | `Ctrl+Space` (`Control+Space` on macOS) |
+| **New Tab in Active Group** | Optional |
 | **Save Tab Snapshot** | Optional |
 | **Unload Inactive Tabs** | Optional |
 
@@ -109,13 +111,29 @@ npm test            # Run the unit test suite
 
 ---
 
-## Optional: Vivaldi CSS Hacks
+## Vivaldi Themes & Optional CSS Hacks
 
-If you use VBerry as a Vivaldi Web Panel and want a cleaner, edge-to-edge sidebar, check out the optional CSS mods in [`vivaldi css hacks/`](./vivaldi%20css%20hacks). They can hide Vivaldi's panel icon strip, web panel header, and extra window borders.
+### Matching Vivaldi Themes ([`vivaldi themes/`](./vivaldi%20themes))
+VBerry ships with 12 ready-to-import native Vivaldi `.zip` themes paired 1:1 with every extension theme (**Vivaldi Light / Dark**, **Chrome Light / Dark**, *Mineral Slate*, *Warm Paper*, *Coastal Mist*, *Graphite Plum*, *Nordic Frost*, *Evergreen Studio*, *Midnight Indigo*, and *Espresso & Brass*). Each theme tunes Vivaldi's canvas, recessed window rail, ink foreground, highlight accent, and `8px` corner rounding so Vivaldi's chrome blends seamlessly into VBerry's Side Panel.
+
+To install in Vivaldi:
+1. Open **Vivaldi Settings → Themes** (`vivaldi://settings/themes/`) and click **Open Theme…**.
+2. Select any `.zip` file from [`vivaldi themes/`](./vivaldi%20themes).
+3. Select the matching theme in **VBerry Preferences → Appearance & tabs** (or customize your colors and copy the hex codes into Vivaldi's Theme Editor).
+
+### Optional Vivaldi CSS Hacks ([`vivaldi css hacks/`](./vivaldi%20css%20hacks))
+If you want a clean, edge-to-edge sidebar in Vivaldi without duplicate toolbars or thick outer borders, you can load the optional Custom UI CSS mods in [`vivaldi css hacks/`](./vivaldi%20css%20hacks):
+
+| File | What it does |
+| --- | --- |
+| [`hide-panel-switch.css`](./vivaldi%20css%20hacks/hide-panel-switch.css) | Hides Vivaldi's vertical panel icon strip (`#switch`), lets the open VBerry panel expand to full width, and collapses the panel container to `0px` when closed. |
+| [`hide-webpanel-header.css`](./vivaldi%20css%20hacks/hide-webpanel-header.css) | Hides the Web Panel header bar (URL title, Back/Forward/Reload/Home, Close buttons) so VBerry fills the full vertical height of the sidebar. |
+| [`hide-window-borders.css`](./vivaldi%20css%20hacks/hide-window-borders.css) | Removes Vivaldi's right and bottom outer window borders/padding on the page viewport and panel container, narrows the gap between sidebar and page to `3px`, and keeps fullscreen flush edge-to-edge. |
 
 To enable them in Vivaldi:
 1. Open `vivaldi://experiments` and enable **Allow for using CSS modifications**.
-2. Open **Settings → Appearance → Custom UI Modifications**, select the [`vivaldi css hacks`](./vivaldi%20css%20hacks) folder, and restart Vivaldi.
+2. Open **Settings → Appearance → Custom UI Modifications**, click **Select Folder…**, and pick the [`vivaldi css hacks`](./vivaldi%20css%20hacks) folder (keep only the `.css` files you want).
+3. Restart Vivaldi. Use `Ctrl+E` (or Vivaldi's Panel toggle button / `F4`) to open and close the sidebar when `hide-panel-switch.css` is active.
 
 ---
 

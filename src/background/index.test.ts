@@ -40,21 +40,51 @@ async function flushMicrotasks() {
 describe('toggle_side_panel background lifecycle', () => {
   let onCommand: ReturnType<typeof makeEvent<(cmd: string, tab?: any) => void>>
   let onConnect: ReturnType<typeof makeEvent<(port: any) => void>>
+  let onWinCreated: ReturnType<typeof makeEvent<(win: any) => void>>
   let onFocusChanged: ReturnType<typeof makeEvent<(winId: number) => void>>
   let onWinRemoved: ReturnType<typeof makeEvent<(winId: number) => void>>
   let onTabActivated: ReturnType<typeof makeEvent<(info: { tabId: number; windowId: number }) => void>>
+  let onTabCreated: ReturnType<typeof makeEvent<(tab: any) => void>>
+  let onMenuClicked: ReturnType<typeof makeEvent<(info: any, tab?: any) => void>>
   let sidePanelOpen: ReturnType<typeof vi.fn>
+  let sidePanelSetOptions: ReturnType<typeof vi.fn>
   let sendMessage: ReturnType<typeof vi.fn>
+  let sessionStore: Record<string, any>
+  let tabsById: Map<number, any>
   let windowsById: Map<number, { id: number; type: string; focused: boolean }>
+  let inUserGesture = false
 
-  async function bootServiceWorker(opts?: { lastFocusedWinId?: number | null }) {
+  function emitWithGesture<T extends (...args: any[]) => any>(
+    ev: ReturnType<typeof makeEvent<T>>,
+    ...args: Parameters<T>
+  ) {
+    inUserGesture = true
+    try {
+      ev.emit(...args)
+    } finally {
+      inUserGesture = false
+    }
+  }
+
+  async function bootServiceWorker(opts?: { lastFocusedWinId?: number | null; enforceGesture?: boolean }) {
     vi.resetModules()
     onCommand = makeEvent()
     onConnect = makeEvent()
+    onWinCreated = makeEvent()
     onFocusChanged = makeEvent()
     onWinRemoved = makeEvent()
     onTabActivated = makeEvent()
-    sidePanelOpen = vi.fn(async () => {})
+    onTabCreated = makeEvent()
+    onMenuClicked = makeEvent()
+    inUserGesture = false
+    sessionStore = {}
+    tabsById = new Map()
+    sidePanelOpen = vi.fn(async () => {
+      if (opts?.enforceGesture && !inUserGesture) {
+        throw new Error('`sidePanel.open()` may only be called in response to a user gesture.')
+      }
+    })
+    sidePanelSetOptions = vi.fn(async () => {})
     sendMessage = vi.fn(async () => {})
     windowsById = new Map([
       [10, { id: 10, type: 'normal', focused: true }],
@@ -75,9 +105,13 @@ describe('toggle_side_panel background lifecycle', () => {
       },
       sidePanel: {
         open: sidePanelOpen,
+        setOptions: sidePanelSetOptions,
         setPanelBehavior: vi.fn(async () => {}),
       },
       windows: {
+        WINDOW_ID_NONE: -1,
+        WINDOW_ID_CURRENT: -2,
+        onCreated: onWinCreated,
         onFocusChanged,
         onRemoved: onWinRemoved,
         get: vi.fn(async (id: number) => {
@@ -97,11 +131,18 @@ describe('toggle_side_panel background lifecycle', () => {
       },
       tabs: {
         onActivated: onTabActivated,
-        onCreated: makeEvent(),
+        onCreated: onTabCreated,
         onRemoved: makeEvent(),
         onMoved: makeEvent(),
+        onAttached: makeEvent(),
+        onDetached: makeEvent(),
         onReplaced: makeEvent(),
         onUpdated: makeEvent(),
+        get: vi.fn(async (id: number) => {
+          const t = tabsById.get(id)
+          if (!t) throw new Error(`No tab ${id}`)
+          return t
+        }),
         query: vi.fn(async () => []),
       },
       tabGroups: {
@@ -116,8 +157,16 @@ describe('toggle_side_panel background lifecycle', () => {
           set: vi.fn(async () => {}),
         },
         session: {
-          get: vi.fn(async () => ({})),
-          set: vi.fn(async () => {}),
+          get: vi.fn(async (key?: string | string[]) => {
+            if (!key) return { ...sessionStore }
+            if (typeof key === 'string') return key in sessionStore ? { [key]: sessionStore[key] } : {}
+            const out: Record<string, any> = {}
+            for (const k of key) if (k in sessionStore) out[k] = sessionStore[k]
+            return out
+          }),
+          set: vi.fn(async (patch: Record<string, any>) => {
+            Object.assign(sessionStore, patch)
+          }),
         },
         onChanged: makeEvent(),
       },
@@ -129,7 +178,7 @@ describe('toggle_side_panel background lifecycle', () => {
       contextMenus: {
         create: vi.fn(),
         removeAll: vi.fn((cb?: () => void) => cb?.()),
-        onClicked: makeEvent(),
+        onClicked: onMenuClicked,
       },
       commands: {
         onCommand,
@@ -190,30 +239,45 @@ describe('toggle_side_panel background lifecycle', () => {
     expect(msg.openedBefore).toBeGreaterThanOrEqual(beforeCmd)
   })
 
-  it('falls back to getTargetWindowId when cold service worker receives no tab', async () => {
-    await bootServiceWorker({ lastFocusedWinId: null })
-    onCommand.emit('toggle_side_panel', undefined)
+  it('opens synchronously via WINDOW_ID_CURRENT (-2) preserving user gesture when cold service worker receives no tab', async () => {
+    await bootServiceWorker({ lastFocusedWinId: null, enforceGesture: true })
+    expect(sidePanelSetOptions).toHaveBeenCalledWith({ path: 'sidepanel.html', enabled: true })
+
+    emitWithGesture(onCommand, 'toggle_side_panel', undefined)
+
+    // Must be called synchronously inside the command turn before any await
+    expect(sidePanelOpen).toHaveBeenCalledWith({ windowId: -2 })
 
     await flushMicrotasks()
 
-    expect(sidePanelOpen).toHaveBeenCalledWith({ windowId: 10 })
     expect(sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'vberry:close-panel', windowId: 10 })
     )
   })
 
-  it('ignores popup focus and unfocused window tab activation when tracking lastFocusedWindowId', async () => {
-    await bootServiceWorker({ lastFocusedWinId: 10 })
+  it('opens synchronously via WINDOW_ID_CURRENT on action context menu click when cold service worker receives no tab', async () => {
+    await bootServiceWorker({ lastFocusedWinId: null, enforceGesture: true })
+
+    emitWithGesture(onMenuClicked, { menuItemId: 'vberry_action_open_sidepanel' }, undefined)
+    expect(sidePanelOpen).toHaveBeenCalledWith({ windowId: -2 })
+  })
+
+  it('ignores popup focus while immediately targeting newly focused normal windows via tab.windowId', async () => {
+    await bootServiceWorker({ lastFocusedWinId: 10, enforceGesture: true })
     await flushMicrotasks()
 
-    // Focusing a popup window must not pollute lastFocusedWindowId
+    // Focusing a popup window must not pollute lastFocusedWindowId, even if tab comes from popup 99
     onFocusChanged.emit(99)
     // Activating a tab in an unfocused normal window must not steal lastFocusedWindowId
     onTabActivated.emit({ tabId: 5, windowId: 20 })
     await flushMicrotasks()
 
-    onCommand.emit('toggle_side_panel', { id: 1, windowId: 10 })
-    expect(sidePanelOpen).toHaveBeenCalledWith({ windowId: 10 })
+    emitWithGesture(onCommand, 'toggle_side_panel', { id: 9, windowId: 99 })
+    expect(sidePanelOpen).toHaveBeenLastCalledWith({ windowId: 10 })
+
+    // Pressing Ctrl+E inside normal window 20 targets window 20 immediately even before onFocusChanged resolves
+    emitWithGesture(onCommand, 'toggle_side_panel', { id: 5, windowId: 20 })
+    expect(sidePanelOpen).toHaveBeenLastCalledWith({ windowId: 20 })
   })
 
   it('falls through synchronously to sidePanel.open if a stale port throws on postMessage', async () => {
@@ -225,5 +289,17 @@ describe('toggle_side_panel background lifecycle', () => {
 
     onCommand.emit('toggle_side_panel', { id: 1, windowId: 10 })
     expect(sidePanelOpen).toHaveBeenCalledWith({ windowId: 10 })
+  })
+
+  it('auto-nests child tabs in Vivaldi when openerTabId is attached right after tabs.onCreated', async () => {
+    await bootServiceWorker()
+    tabsById.set(100, { id: 100, windowId: 10, groupId: -1, pinned: false })
+    tabsById.set(101, { id: 101, windowId: 10, groupId: -1, pinned: false, openerTabId: 100 })
+
+    // Vivaldi emits tabs.onCreated before populating openerTabId on extension-created tabs
+    onTabCreated.emit({ id: 101, windowId: 10, groupId: -1, pinned: false })
+    await flushMicrotasks()
+
+    expect(sessionStore.vberry_tree_meta).toEqual({ 101: { parentId: 100 } })
   })
 })

@@ -16,6 +16,7 @@ import { createNewTab, getTargetWindowId } from '@/shared/env'
 import { rankSearchItems } from '@/shared/search'
 import {
   buildTabTree,
+  computeTabDropIndex,
   getSubtreeIds,
   indentTab,
   outdentTab,
@@ -91,6 +92,12 @@ const itemMenu = ref<ItemMenuState | null>(null)
 async function focusSearchBox() {
   await nextTick()
   searchInputRef.value?.focus({ preventScroll: true })
+}
+
+function clearSearchBox() {
+  searchQuery.value = ''
+  searchCursor.value = -1
+  void focusSearchBox()
 }
 
 const {
@@ -411,7 +418,13 @@ async function handleDropTab(
     virtualGroupMap.value = await assignTabsToVirtualGroup(subtreeIds, targetVirtual)
   }
 
-  const targetIdx = position === 'before' ? targetTab.index : targetTab.index + 1
+  const targetIdx = computeTabDropIndex(
+    tabs.value,
+    treeMeta.value,
+    subtreeIds,
+    targetId,
+    position
+  )
   await chrome.tabs.move(subtreeIds, { index: targetIdx }).catch(() => {})
 
   const nextMeta: TabTreeMap = { ...treeMeta.value }
@@ -1210,6 +1223,7 @@ onUnmounted(() => {
             active: activeView.kind === 'ungrouped',
             'drag-over': dragOverPanelKey === 'ungrouped',
           }"
+          style="--pill-color: var(--accent)"
           title="Ungrouped Tabs (Right-click for panel actions)"
           @click="selectView({ kind: 'ungrouped' })"
           @contextmenu.prevent="openGroupContextMenu({ kind: 'ungrouped' }, $event)"
@@ -1217,7 +1231,6 @@ onUnmounted(() => {
           @dragleave="dragOverPanelKey = null"
           @drop="handleDropOnPanel($event, UNGROUPED_ID)"
         >
-          <span class="pill-dot" style="background: var(--grp-grey)" />
           <span class="pill-label">Tabs</span>
           <span v-if="settings.showTabCounts" class="pill-count">{{ ungroupedTabs.length }}</span>
         </button>
@@ -1231,6 +1244,7 @@ onUnmounted(() => {
             active: activeView.kind === 'group' && activeView.groupId === g.id,
             'drag-over': dragOverPanelKey === `g_${g.id}`,
           }"
+          :style="{ '--pill-color': `var(--grp-${g.color})` }"
           :title="`${g.title || 'Group'} (Right-click for group actions)`"
           @click="selectView({ kind: 'group', groupId: g.id })"
           @contextmenu.prevent="openGroupContextMenu({ kind: 'native', group: g }, $event)"
@@ -1238,7 +1252,6 @@ onUnmounted(() => {
           @dragleave="dragOverPanelKey = null"
           @drop="handleDropOnPanel($event, g.id)"
         >
-          <span class="pill-dot" :style="{ background: `var(--grp-${g.color})` }" />
           <span class="pill-label">{{ g.title || 'Group' }}</span>
           <span v-if="settings.showTabCounts" class="pill-count">
             {{ tabsByGroupId.get(g.id)?.length ?? 0 }}
@@ -1255,6 +1268,7 @@ onUnmounted(() => {
             'saved-empty': (tabsBySavedId.get(sp.id)?.length ?? 0) === 0,
             'drag-over': dragOverPanelKey === `s_${sp.id}`,
           }"
+          :style="{ '--pill-color': `var(--grp-${sp.color})` }"
           :title="`${sp.title} (Right-click for group actions)`"
           @click="selectView({ kind: 'saved', savedId: sp.id })"
           @contextmenu.prevent="openGroupContextMenu({ kind: 'saved', panel: sp }, $event)"
@@ -1262,7 +1276,6 @@ onUnmounted(() => {
           @dragleave="dragOverPanelKey = null"
           @drop="handleDropOnPanel($event, sp)"
         >
-          <span class="pill-dot" :style="{ background: `var(--grp-${sp.color})` }" />
           <span class="pill-label">{{ sp.title }}</span>
           <span
             v-if="settings.showTabCounts && (tabsBySavedId.get(sp.id)?.length ?? 0) > 0"
@@ -1320,7 +1333,7 @@ onUnmounted(() => {
         >
           <svg viewBox="0 0 16 16" aria-hidden="true">
             <path
-              d="M8 1.5 9.95 5.45l4.35.63-3.15 3.07.74 4.35L8 11.45 4.11 13.5l.74-4.35L1.7 6.08l4.35-.63Z"
+              d="M4.2 2.2h7.6a1 1 0 0 1 1 1v10.6L8 11.1l-4.8 2.7V3.2a1 1 0 0 1 1-1Z"
               fill="none"
               stroke="currentColor"
               stroke-width="1.5"
@@ -1399,18 +1412,49 @@ onUnmounted(() => {
 
     <!-- Search Bar -->
     <form v-if="activeView.kind !== 'snapshots'" role="search" class="search-bar" @submit.prevent>
-      <input
-        id="vberry-search"
-        ref="searchInputRef"
-        v-model="searchQuery"
-        v-autofocus="isPopup"
-        class="search-input"
-        type="search"
-        name="searchText"
-        autocomplete="off"
-        :placeholder="searchPlaceholder"
-        @keydown="onSearchKeyDown"
-      />
+      <div class="search-field">
+        <svg class="search-glyph" viewBox="0 0 16 16" aria-hidden="true">
+          <circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.5" />
+          <path
+            d="m10.5 10.5 3.2 3.2"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
+        </svg>
+        <input
+          id="vberry-search"
+          ref="searchInputRef"
+          v-model="searchQuery"
+          v-autofocus="isPopup"
+          class="search-input"
+          type="search"
+          name="searchText"
+          autocomplete="off"
+          :placeholder="searchPlaceholder"
+          @keydown="onSearchKeyDown"
+        />
+        <button
+          v-if="searchQuery"
+          type="button"
+          tabindex="-1"
+          class="search-clear"
+          title="Clear search"
+          @mousedown.prevent
+          @click="clearSearchBox"
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path
+              d="M4.5 4.5l7 7m0-7-7 7"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.65"
+              stroke-linecap="round"
+            />
+          </svg>
+        </button>
+      </div>
     </form>
 
     <!-- Pinned Tabs Strip -->
@@ -1420,7 +1464,7 @@ onUnmounted(() => {
         :key="pt.id"
         type="button"
         class="pinned-tile"
-        :class="{ active: pt.active, discarded: pt.discarded }"
+        :class="{ active: pt.active, discarded: pt.discarded, audible: pt.audible }"
         :title="pt.title || pt.url"
         @mousedown.left="pt.id !== undefined && activateTab(pt.id, $event)"
         @keydown.enter.prevent="pt.id !== undefined && activateTab(pt.id)"
@@ -1433,7 +1477,20 @@ onUnmounted(() => {
           :src="getChromeFaviconUrl(pt.url || pt.pendingUrl, 32) || pt.favIconUrl"
           alt=""
         />
-        <span v-else>•</span>
+        <svg v-else class="pinned-fallback" viewBox="0 0 16 16" aria-hidden="true">
+          <rect
+            x="2.5"
+            y="2.5"
+            width="11"
+            height="11"
+            rx="2.5"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.4"
+          />
+          <path d="M2.5 6h11" fill="none" stroke="currentColor" stroke-width="1.3" />
+        </svg>
+        <span v-if="pt.audible && !pt.mutedInfo?.muted" class="pinned-audio" />
       </button>
     </div>
 
@@ -1497,11 +1554,13 @@ onUnmounted(() => {
         :highlighted-id="highlightedTabId"
         :group-title="activeGroupTitle"
         :is-saved-empty="activeView.kind === 'saved' && activeTabList.length === 0"
+        :is-filtering="Boolean(searchQuery.trim())"
         @activate="activateTab"
         @close="closeTab"
         @toggle-fold="handleToggleFold"
         @toggle-mute="handleToggleMute"
         @new-tab="openNewTabInActiveView()"
+        @clear-search="clearSearchBox"
         @context-menu="openTabContextMenu"
         @panel-context-menu="openActivePanelContextMenu"
         @drop-tab="handleDropTab"
@@ -1561,8 +1620,8 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 4px;
-  padding: 6px 8px 4px;
+  gap: 5px;
+  padding: 6px 8px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-subtle);
 }
@@ -1585,70 +1644,76 @@ onUnmounted(() => {
   align-items: center;
   gap: 2px;
   flex-shrink: 0;
-  padding-left: 4px;
+  padding-left: 5px;
   border-left: 1px solid var(--border);
 }
 
 .panel-pill {
+  --pill-color: var(--accent);
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  height: 26px;
-  padding: 0 8px;
-  border: 1px solid transparent;
-  border-radius: 6px;
+  height: 27px;
+  padding: 0 9px;
+  border: 1px solid color-mix(in srgb, var(--pill-color) 62%, var(--border));
+  border-radius: 7px;
   background: transparent;
+  color: var(--text-muted);
   cursor: pointer;
   white-space: nowrap;
   flex-shrink: 0;
   font-size: 12px;
+  font-weight: 500;
+  transition: background-color 0.1s ease, border-color 0.1s ease, color 0.1s ease, box-shadow 0.1s ease;
 }
 
 .panel-pill:hover {
-  background: var(--bg-hover);
+  border-color: var(--pill-color);
+  background: color-mix(in srgb, var(--pill-color) 10%, var(--bg-hover));
+  color: var(--text);
 }
 
 .panel-pill.active {
-  background: var(--bg);
-  border-color: var(--border);
-  font-weight: 600;
+  border-color: var(--pill-color);
+  background: color-mix(in srgb, var(--pill-color) 15%, var(--surface));
+  color: var(--text);
+  box-shadow: inset 0 0 0 0.5px var(--pill-color), var(--shadow-sm);
 }
 
-.panel-pill.saved-empty {
-  border-style: dashed;
-  border-color: var(--border);
+.panel-pill.active .pill-count {
+  color: var(--text);
+  opacity: 0.82;
+}
+
+.panel-pill.saved-empty:not(.active) {
   opacity: 0.72;
 }
 
 .panel-pill.drag-over {
-  outline: 2px solid var(--accent);
-  background: var(--bg-selected);
-}
-
-.pill-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
+  border-color: var(--pill-color);
+  outline: 2px solid var(--pill-color);
+  background: color-mix(in srgb, var(--pill-color) 18%, var(--surface));
+  color: var(--text);
 }
 
 .pill-label {
-  max-width: 96px;
+  max-width: 98px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .pill-count {
   font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
   color: var(--text-muted);
 }
 
 .icon-btn {
-  width: calc(var(--ui-icon-size) + 7px);
-  height: calc(var(--ui-icon-size) + 7px);
+  width: calc(var(--ui-icon-size) + 9px);
+  height: calc(var(--ui-icon-size) + 9px);
   padding: 0;
-  border: none;
-  border-radius: 6px;
+  border: 1px solid transparent;
+  border-radius: 7px;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -1656,6 +1721,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  transition: background-color 0.1s ease, color 0.1s ease, border-color 0.1s ease;
 }
 
 .icon-btn svg {
@@ -1663,10 +1729,14 @@ onUnmounted(() => {
   height: var(--ui-icon-size);
 }
 
-.icon-btn:hover,
-.icon-btn.active {
+.icon-btn:hover {
   background: var(--bg-hover);
   color: var(--text);
+}
+
+.icon-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .panel-pill:focus-visible,
@@ -1679,31 +1749,83 @@ onUnmounted(() => {
 .search-bar {
   padding: 6px 8px;
   border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.search-field {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.search-glyph {
+  position: absolute;
+  left: 9px;
+  width: 13.5px;
+  height: 13.5px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.search-field:focus-within .search-glyph {
+  color: var(--accent);
 }
 
 .search-input {
   width: 100%;
-  height: 28px;
-  padding: 0 10px;
+  height: 30px;
+  padding: 0 28px 0 29px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 7px;
   background: var(--bg-subtle);
   outline: none;
   font-size: 12.5px;
+  transition: border-color 0.12s ease, background-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.search-input::placeholder {
+  color: var(--text-muted);
 }
 
 .search-input:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
-  background: var(--bg);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+  background: var(--surface);
+}
+
+.search-clear {
+  position: absolute;
+  right: 5px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.search-clear svg {
+  width: 12px;
+  height: 12px;
+}
+
+.search-clear:hover {
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 .pinned-strip {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 5px;
   padding: 6px 8px;
   border-bottom: 1px solid var(--border);
+  background: var(--bg);
 }
 
 .view-body {
@@ -1714,20 +1836,23 @@ onUnmounted(() => {
 }
 
 .pinned-tile {
-  width: calc(var(--icon-size) + 14px);
-  height: calc(var(--icon-size) + 12px);
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: var(--bg-subtle);
+  position: relative;
+  width: calc(var(--icon-size) + 15px);
+  height: calc(var(--icon-size) + 13px);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 0;
+  transition: background-color 0.1s ease, border-color 0.1s ease;
 }
 
 .pinned-tile:hover {
   background: var(--bg-hover);
+  border-color: var(--border-strong);
 }
 
 .pinned-tile.active {
@@ -1735,14 +1860,37 @@ onUnmounted(() => {
   border-color: var(--accent);
 }
 
-.pinned-tile.discarded {
-  opacity: 0.55;
+.pinned-tile.active::after {
+  content: '';
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  bottom: 2px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
 }
 
-.pinned-tile img {
+.pinned-tile.discarded {
+  opacity: 0.56;
+}
+
+.pinned-tile img,
+.pinned-fallback {
   width: var(--icon-size);
   height: var(--icon-size);
-  border-radius: 2px;
+  border-radius: 3px;
+  color: var(--text-muted);
+}
+
+.pinned-audio {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
 }
 
 .popup-tip {
@@ -1750,8 +1898,8 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   flex-wrap: wrap;
-  gap: 8px;
-  padding: 5px 8px;
+  gap: 10px;
+  padding: 6px 10px;
   border-top: 1px solid var(--border);
   background: var(--bg-subtle);
   color: var(--text-muted);
@@ -1761,11 +1909,12 @@ onUnmounted(() => {
 }
 
 .popup-tip kbd {
-  padding: 1px 4px;
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  background: var(--bg);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 1px 5px;
+  margin-right: 3px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface);
+  font-family: var(--font-mono);
   font-size: 10px;
   color: var(--text);
 }

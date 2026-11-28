@@ -46,6 +46,7 @@ declare namespace chrome {
 
   namespace sidePanel {
     function setPanelBehavior(options: { openPanelOnActionClick?: boolean }): Promise<void>
+    function setOptions(options: { tabId?: number; path?: string; enabled?: boolean }): Promise<void>
     function open(options: { windowId?: number; tabId?: number }): Promise<void>
   }
 
@@ -196,6 +197,12 @@ declare namespace chrome {
       incognito?: boolean
     }): Promise<Window>
     function update(windowId: number, updateInfo: { focused?: boolean }): Promise<Window>
+    const WINDOW_ID_NONE: number
+    const WINDOW_ID_CURRENT: number
+    const onCreated: {
+      addListener(cb: (window: Window) => void): void
+      removeListener(cb: (window: Window) => void): void
+    }
     const onFocusChanged: {
       addListener(cb: (windowId: number) => void): void
       removeListener(cb: (windowId: number) => void): void
@@ -213,8 +220,15 @@ declare namespace chrome {
       remove(keys: string | string[]): Promise<void>
       clear(): Promise<void>
     }
+    interface SyncStorageArea extends StorageArea {
+      getBytesInUse(keys?: string | string[] | null): Promise<number>
+      readonly QUOTA_BYTES: number
+      readonly QUOTA_BYTES_PER_ITEM: number
+      readonly MAX_ITEMS: number
+    }
     const local: StorageArea
     const session: StorageArea
+    const sync: SyncStorageArea
     interface StorageChange {
       oldValue?: any
       newValue?: any

@@ -63,17 +63,40 @@ export function stripTrashFolders(
   return out
 }
 
+let cachedTrashIds: Set<string> | null = null
+let boundBookmarksRef: unknown = null
+
+async function getTrashBookmarkIds(): Promise<Set<string>> {
+  const bm = typeof chrome !== 'undefined' ? chrome.bookmarks : undefined
+  const canCache = Boolean(bm?.onCreated?.addListener)
+  if (canCache && boundBookmarksRef !== bm) {
+    boundBookmarksRef = bm
+    cachedTrashIds = null
+    const invalidate = () => {
+      cachedTrashIds = null
+    }
+    bm!.onCreated.addListener(invalidate)
+    bm!.onRemoved?.addListener(invalidate)
+    bm!.onChanged?.addListener(invalidate)
+    bm!.onMoved?.addListener(invalidate)
+  }
+  if (canCache && cachedTrashIds !== null) return cachedTrashIds
+  const tree = await chrome.bookmarks.getTree().catch(() => [])
+  const ids = collectTrashBookmarkIds(tree)
+  if (canCache) cachedTrashIds = ids
+  return ids
+}
+
 /**
  * Search bookmarks while excluding any item inside a Trash folder.
  */
 export async function searchNonTrashBookmarks(
   query: string
 ): Promise<chrome.bookmarks.BookmarkTreeNode[]> {
-  const [hits, tree] = await Promise.all([
+  const [hits, trashIds] = await Promise.all([
     chrome.bookmarks.search(query).catch(() => []),
-    chrome.bookmarks.getTree().catch(() => []),
+    getTrashBookmarkIds(),
   ])
-  const trashIds = collectTrashBookmarkIds(tree)
   return hits.filter(
     h => !trashIds.has(h.id) && !(h.parentId !== undefined && trashIds.has(h.parentId))
   )

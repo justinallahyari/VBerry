@@ -51,10 +51,16 @@ function fillActiveTab() {
 }
 
 function modalHeading(mode: BookmarkModalState['mode']): string {
-  if (mode === 'add-bookmark') return 'Add Bookmark'
-  if (mode === 'edit-bookmark') return 'Edit Bookmark'
-  if (mode === 'add-folder') return 'New Folder'
-  return 'Edit Folder'
+  if (mode === 'add-bookmark') return 'Add bookmark'
+  if (mode === 'edit-bookmark') return 'Edit bookmark'
+  if (mode === 'add-folder') return 'New folder'
+  return 'Edit folder'
+}
+
+function submitLabel(mode: BookmarkModalState['mode']): string {
+  if (mode === 'add-bookmark') return 'Add bookmark'
+  if (mode === 'add-folder') return 'Create folder'
+  return 'Save changes'
 }
 
 function folderLabel(f: BookmarkFolderOption): string {
@@ -71,10 +77,10 @@ function folderLabel(f: BookmarkFolderOption): string {
           v-if="props.modal.mode === 'add-bookmark' && props.activeTab?.url"
           type="button"
           class="fill-btn"
-          title="Fill with active tab's title and URL"
+          title="Fill with the current tab's title and URL"
           @click="fillActiveTab"
         >
-          Use Active Tab
+          Use current tab
         </button>
       </div>
 
@@ -87,7 +93,7 @@ function folderLabel(f: BookmarkFolderOption): string {
           :placeholder="
             props.modal.mode === 'add-folder' || props.modal.mode === 'edit-folder'
               ? 'Folder name'
-              : 'Bookmark title'
+              : 'Page title'
           "
           required
           @input="emit('update:title', ($event.target as HTMLInputElement).value)"
@@ -125,11 +131,7 @@ function folderLabel(f: BookmarkFolderOption): string {
       <div class="modal-actions">
         <button type="button" class="btn-ghost" @click="emit('close')">Cancel</button>
         <button type="submit" class="btn-primary">
-          {{
-            props.modal.mode === 'add-bookmark' || props.modal.mode === 'add-folder'
-              ? 'Add'
-              : 'Save'
-          }}
+          {{ submitLabel(props.modal.mode) }}
         </button>
       </div>
     </form>
@@ -140,7 +142,7 @@ function folderLabel(f: BookmarkFolderOption): string {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.38);
+  background: rgba(12, 14, 20, 0.46);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -148,15 +150,15 @@ function folderLabel(f: BookmarkFolderOption): string {
 }
 
 .modal {
-  width: min(310px, calc(100vw - 24px));
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 14px;
+  width: min(315px, calc(100vw - 24px));
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 11px;
+  padding: 15px;
   box-shadow: var(--shadow);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 11px;
 }
 
 .modal-head {
@@ -168,74 +170,87 @@ function folderLabel(f: BookmarkFolderOption): string {
 
 .modal-title {
   font-weight: 600;
-  font-size: 13.5px;
+  font-size: 14px;
 }
 
 .fill-btn {
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: 6px;
   background: var(--bg-subtle);
   color: var(--accent);
-  padding: 2px 8px;
+  padding: 3px 8px;
   font-size: 11px;
   font-weight: 500;
   cursor: pointer;
 }
 
 .fill-btn:hover {
-  background: var(--bg-hover);
+  background: var(--accent-soft);
+  border-color: var(--accent);
 }
 
 .field {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
 }
 
 .field-label {
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 11.5px;
+  font-weight: 500;
   color: var(--text-muted);
 }
 
 .modal-input {
   width: 100%;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-subtle);
+  padding: 7px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background-color: var(--bg);
   outline: none;
   font-size: 12.5px;
 }
 
 .modal-input:focus {
   border-color: var(--accent);
-  background: var(--bg);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+  background-color: var(--surface);
 }
 
 .modal-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 6px;
+  gap: 7px;
   margin-top: 2px;
 }
 
 .btn-ghost,
 .btn-primary {
-  padding: 5px 12px;
-  border-radius: 6px;
+  padding: 6px 13px;
+  border-radius: 7px;
   border: 1px solid var(--border);
   cursor: pointer;
   font-size: 12px;
+  font-weight: 500;
 }
 
 .btn-ghost {
   background: transparent;
+  color: var(--text-muted);
+}
+
+.btn-ghost:hover {
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 .btn-primary {
   background: var(--accent);
   color: var(--accent-text);
   border-color: transparent;
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
 }
 </style>

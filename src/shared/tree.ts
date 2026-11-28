@@ -135,6 +135,47 @@ export function getSubtreeIds(rootId: number, tabs: chrome.tabs.Tab[], meta: Tab
 }
 
 /**
+ * Compute the Chrome `tabs.move` target index when dropping `subtreeIds` relative to `targetId`.
+ * Accounts for moved tabs preceding the insertion point and places `'after'` drops past
+ * `targetId`'s full subtree so folded or expanded parents are never split from their children.
+ */
+export function computeTabDropIndex(
+  tabs: chrome.tabs.Tab[],
+  meta: TabTreeMap,
+  subtreeIds: number[],
+  targetId: number,
+  position: 'before' | 'into' | 'after'
+): number {
+  const targetTab = tabs.find(t => t.id === targetId)
+  if (!targetTab) return 0
+
+  let rawIdx: number
+  if (position === 'before') {
+    rawIdx = targetTab.index
+  } else if (position === 'into') {
+    rawIdx = targetTab.index + 1
+  } else {
+    const targetSubtree = new Set(getSubtreeIds(targetId, tabs, meta))
+    let maxIdx = targetTab.index
+    for (const t of tabs) {
+      if (t.id !== undefined && targetSubtree.has(t.id) && t.index > maxIdx) {
+        maxIdx = t.index
+      }
+    }
+    rawIdx = maxIdx + 1
+  }
+
+  const movingSet = new Set(subtreeIds)
+  let beforeCount = 0
+  for (const t of tabs) {
+    if (t.id !== undefined && movingSet.has(t.id) && t.index < rawIdx) {
+      beforeCount++
+    }
+  }
+  return Math.max(0, rawIdx - beforeCount)
+}
+
+/**
  * Indent a tab under the nearest preceding tab at the same level.
  */
 export function indentTab(tabId: number, nodes: TreeTabNode[], meta: TabTreeMap): TabTreeMap {

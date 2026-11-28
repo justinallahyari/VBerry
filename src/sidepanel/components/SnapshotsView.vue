@@ -1,7 +1,13 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import type { SnapshotGroup, SnapshotTab, SnapshotWindow, VBerrySnapshot } from '@/shared/types'
-import { downloadTextFile, loadSnapshots, saveSnapshots } from '@/shared/storage'
+import {
+  downloadTextFile,
+  loadSnapshots,
+  saveSnapshots,
+  STORAGE_KEYS,
+  toArray,
+} from '@/shared/storage'
 import { getTargetWindowId } from '@/shared/env'
 import { captureSnapshot, restoreSnapshot, restoreSnapshotGroup } from '@/shared/groups'
 import { snapshotToMarkdown } from '@/shared/sidebery-import'
@@ -29,8 +35,9 @@ async function load() {
 async function takeSnapshot() {
   busy.value = true
   try {
-    await captureSnapshot()
+    const snap = await captureSnapshot()
     await load()
+    expandedId.value = snap.id
   } finally {
     busy.value = false
   }
@@ -45,9 +52,18 @@ function countTabs(snap: VBerrySnapshot): number {
   return n
 }
 
+function formatSnapDate(ts: number): string {
+  const d = new Date(ts)
+  const now = new Date()
+  const timeStr = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  if (d.toDateString() === now.toDateString()) return `Today, ${timeStr}`
+  const yest = new Date(now)
+  yest.setDate(now.getDate() - 1)
+  if (d.toDateString() === yest.toDateString()) return `Yesterday, ${timeStr}`
+  return `${d.toLocaleDateString([], { month: 'short', day: 'numeric', year: d.getFullYear() !== now.getFullYear() ? 'numeric' : undefined })}, ${timeStr}`
+}
+
 async function restoreAll(snap: VBerrySnapshot, newWindow: boolean) {
-  // Run new-window restores in the background service worker so focus changes
-  // or side panel closing can never interrupt tree restoration.
   if (newWindow) {
     try {
       const res = await chrome.runtime.sendMessage<{ ok?: boolean }>({
@@ -99,44 +115,96 @@ function openOptions() {
   void chrome.runtime.openOptionsPage()
 }
 
-onMounted(load)
+function onStorageChanged(changes: Record<string, chrome.storage.StorageChange>, area: string) {
+  if (area === 'local' && changes[STORAGE_KEYS.snapshots]) {
+    snapshots.value = toArray<VBerrySnapshot>(changes[STORAGE_KEYS.snapshots].newValue)
+  }
+}
+
+onMounted(() => {
+  void load()
+  chrome.storage?.onChanged?.addListener(onStorageChanged)
+})
+
+onUnmounted(() => {
+  chrome.storage?.onChanged?.removeListener(onStorageChanged)
+})
 </script>
 
 <template>
   <div class="snap-view">
     <div class="snap-toolbar">
-      <button class="primary-btn" :disabled="busy" @click="takeSnapshot">
-        {{ busy ? 'Saving…' : '+ Take Snapshot' }}
+      <button type="button" class="primary-btn" :disabled="busy" @click="takeSnapshot">
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path
+            d="M8 3v10M3 8h10"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.7"
+            stroke-linecap="round"
+          />
+        </svg>
+        <span>{{ busy ? 'Saving…' : 'Save snapshot' }}</span>
       </button>
-      <button class="secondary-btn" @click="openOptions">Import Sidebery</button>
+      <button type="button" class="secondary-btn" @click="openOptions">Import backup</button>
     </div>
 
     <div v-if="snapshots.length === 0" class="empty">
-      No snapshots yet. Take a snapshot or import a Sidebery backup in Settings.
+      <div class="empty-title">No snapshots saved yet</div>
+      <p class="empty-sub">
+        Save your open windows, groups, and nested tab trees anytime — or import an existing
+        Sidebery backup.
+      </p>
     </div>
 
-    <div v-for="snap in snapshots" :key="snap.id" class="snap-card">
-      <div
+    <div
+      v-for="snap in snapshots"
+      :key="snap.id"
+      class="snap-card"
+      :class="{ expanded: expandedId === snap.id }"
+    >
+      <button
+        type="button"
         class="snap-header"
         @click="expandedId = expandedId === snap.id ? null : snap.id"
         @contextmenu.prevent="emit('contextMenu', { kind: 'snapshot', snapshot: snap }, $event)"
       >
         <div class="snap-meta">
-          <div class="snap-date">{{ new Date(snap.time).toLocaleString() }}</div>
+          <div class="snap-date">{{ formatSnapDate(snap.time) }}</div>
           <div class="snap-info">
-            {{ snap.windows.length }} win · {{ countTabs(snap) }} tabs
+            <span>{{ snap.windows.length }} win · {{ countTabs(snap) }} tabs</span>
             <span v-if="snap.source === 'sidebery'" class="tag">Sidebery</span>
           </div>
         </div>
-        <span class="chev">{{ expandedId === snap.id ? '▾' : '▸' }}</span>
-      </div>
+        <svg
+          class="chev"
+          :class="{ open: expandedId === snap.id }"
+          viewBox="0 0 16 16"
+          aria-hidden="true"
+        >
+          <path
+            d="m6 4 4 4-4 4"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.7"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </button>
 
       <div v-if="expandedId === snap.id" class="snap-body">
         <div class="snap-actions">
-          <button class="mini-btn" @click="restoreAll(snap, true)">Restore in New Window</button>
-          <button class="mini-btn" @click="restoreAll(snap, false)">Restore Here</button>
-          <button class="mini-btn" @click="exportMd(snap)">Markdown</button>
-          <button class="mini-btn danger" @click="removeSnapshot(snap.id)">Delete</button>
+          <button type="button" class="mini-btn accent-mini" @click="restoreAll(snap, true)">
+            Restore in new window
+          </button>
+          <button type="button" class="mini-btn" @click="restoreAll(snap, false)">
+            Restore here
+          </button>
+          <button type="button" class="mini-btn" @click="exportMd(snap)">Export Markdown</button>
+          <button type="button" class="mini-btn danger" @click="removeSnapshot(snap.id)">
+            Delete
+          </button>
         </div>
 
         <div v-for="(win, wi) in snap.windows" :key="wi" class="snap-win">
@@ -145,17 +213,21 @@ onMounted(load)
             @contextmenu.prevent="emit('contextMenu', { kind: 'snapshot-window', window: win }, $event)"
           >
             <span class="win-title">Window {{ wi + 1 }} ({{ countWindowTabs(win) }})</span>
-            <button class="link-btn" @click="restoreWindow(win, true)">Restore Window</button>
+            <button type="button" class="link-btn" @click="restoreWindow(win, true)">
+              Restore window
+            </button>
           </div>
           <div v-if="win.pinned.length" class="snap-group">
             <div class="snap-group-head">
-              <span class="g-name">📌 Pinned ({{ win.pinned.length }})</span>
+              <span class="g-pill" style="--pill-color: var(--accent)">
+                Pinned ({{ win.pinned.length }})
+              </span>
             </div>
             <div
               v-for="(pt, pti) in win.pinned"
               :key="`p_${pti}`"
               class="snap-tab"
-              style="padding-left: 10px"
+              style="padding-left: 12px"
               :title="pt.url"
               @contextmenu.prevent="emit('contextMenu', { kind: 'snapshot-tab', tab: pt }, $event)"
             >
@@ -167,19 +239,28 @@ onMounted(load)
               class="snap-group-head"
               @contextmenu.prevent="emit('contextMenu', { kind: 'snapshot-group', group: g }, $event)"
             >
-              <span class="dot" :style="{ background: `var(--grp-${g.color})` }" />
-              <span class="g-name">{{ g.title }} ({{ g.tabs.length }})</span>
-              <button class="link-btn" @click="restoreGroup(g)">Restore Group</button>
+              <span
+                class="g-pill"
+                :style="{
+                  '--pill-color': g.ungrouped ? 'var(--accent)' : `var(--grp-${g.color})`,
+                }"
+              >
+                {{ g.title }} ({{ g.tabs.length }})
+              </span>
+              <button type="button" class="link-btn" @click="restoreGroup(g)">
+                Restore group
+              </button>
             </div>
             <div
               v-for="(t, ti) in g.tabs"
               :key="ti"
               class="snap-tab"
-              :style="{ paddingLeft: `${10 + t.level * 12}px` }"
+              :class="{ nested: t.level > 0 }"
+              :style="{ paddingLeft: `${12 + t.level * 12}px` }"
               :title="t.url"
               @contextmenu.prevent="emit('contextMenu', { kind: 'snapshot-tab', tab: t }, $event)"
             >
-              <span v-if="t.level > 0" class="tree-prefix">↳ </span>{{ t.title || t.url }}
+              {{ t.title || t.url }}
             </div>
           </div>
         </div>
@@ -192,7 +273,7 @@ onMounted(load)
 .snap-view {
   flex: 1;
   overflow-y: auto;
-  padding: 8px;
+  padding: 10px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -205,37 +286,71 @@ onMounted(load)
 
 .primary-btn,
 .secondary-btn {
-  flex: 1;
-  padding: 6px 10px;
-  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 7px 11px;
+  border-radius: 7px;
   border: 1px solid var(--border);
   cursor: pointer;
   font-size: 12px;
   font-weight: 500;
+  transition: background-color 0.1s ease, border-color 0.1s ease;
 }
 
 .primary-btn {
+  flex: 1.3;
   background: var(--accent);
   color: var(--accent-text);
   border-color: transparent;
 }
 
+.primary-btn svg {
+  width: 13px;
+  height: 13px;
+}
+
+.primary-btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.primary-btn:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
 .secondary-btn {
-  background: var(--bg-subtle);
+  flex: 1;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.secondary-btn:hover {
+  background: var(--bg-hover);
 }
 
 .snap-card {
   border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-subtle);
+  border-radius: 9px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
   overflow: hidden;
 }
 
+.snap-card.expanded {
+  border-color: var(--border-strong);
+}
+
 .snap-header {
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 10px;
+  padding: 9px 11px;
   cursor: pointer;
 }
 
@@ -243,75 +358,125 @@ onMounted(load)
   background: var(--bg-hover);
 }
 
+.snap-header:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .snap-date {
-  font-weight: 500;
+  font-weight: 600;
   font-size: 12.5px;
+  color: var(--text);
 }
 
 .snap-info {
+  margin-top: 1px;
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
   color: var(--text-muted);
   display: flex;
   align-items: center;
   gap: 6px;
 }
 
+.chev {
+  width: 14px;
+  height: 14px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  transition: transform 0.12s ease;
+}
+
+.chev.open {
+  transform: rotate(90deg);
+  color: var(--accent);
+}
+
 .tag {
-  padding: 0 5px;
-  border-radius: 4px;
-  background: var(--bg-active);
-  color: var(--text);
+  padding: 1px 6px;
+  border-radius: 99px;
+  background: var(--accent-soft);
+  color: var(--accent);
   font-size: 10px;
+  font-weight: 600;
 }
 
 .snap-body {
   border-top: 1px solid var(--border);
-  padding: 8px 10px;
+  padding: 9px 11px;
   background: var(--bg);
 }
 
 .snap-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 5px;
   margin-bottom: 8px;
 }
 
 .mini-btn {
-  padding: 3px 7px;
+  padding: 4px 8px;
   font-size: 11px;
-  border-radius: 4px;
+  font-weight: 500;
+  border-radius: 5px;
   border: 1px solid var(--border);
-  background: var(--bg-subtle);
+  background: var(--surface);
+  color: var(--text);
   cursor: pointer;
+}
+
+.mini-btn:hover {
+  background: var(--bg-hover);
+}
+
+.mini-btn.accent-mini {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.mini-btn.accent-mini:hover {
+  background: var(--accent-soft);
 }
 
 .mini-btn.danger {
   color: var(--danger);
 }
 
+.mini-btn.danger:hover {
+  background: var(--danger-soft);
+  border-color: var(--danger-soft);
+}
+
 .snap-group {
-  margin-bottom: 6px;
+  margin-bottom: 7px;
 }
 
 .snap-group-head {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 6px;
   font-size: 12px;
-  font-weight: 500;
-  margin-bottom: 2px;
+  font-weight: 600;
+  margin-bottom: 3px;
 }
 
-.dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.g-name {
-  flex: 1;
+.g-pill {
+  --pill-color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  padding: 1px 7px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--pill-color) 70%, var(--border));
+  background: color-mix(in srgb, var(--pill-color) 11%, var(--surface));
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .link-btn {
@@ -319,16 +484,34 @@ onMounted(load)
   background: transparent;
   color: var(--accent);
   font-size: 11px;
+  font-weight: 500;
   cursor: pointer;
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+.link-btn:hover {
+  background: var(--accent-soft);
 }
 
 .snap-tab {
+  position: relative;
   font-size: 11.5px;
   color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  padding: 1px 0;
+  padding: 2px 0;
+}
+
+.snap-tab.nested::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border-strong);
 }
 
 .win-head {
@@ -336,8 +519,8 @@ onMounted(load)
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  margin: 6px 0 4px;
-  padding-bottom: 2px;
+  margin: 6px 0 5px;
+  padding-bottom: 3px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -348,9 +531,22 @@ onMounted(load)
 }
 
 .empty {
-  padding: 24px 12px;
+  padding: 32px 16px;
   text-align: center;
   color: var(--text-muted);
+}
+
+.empty-title {
+  font-weight: 600;
+  font-size: 13.5px;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+
+.empty-sub {
+  margin: 0 auto;
+  max-width: 240px;
   font-size: 12px;
+  line-height: 1.45;
 }
 </style>

@@ -18,14 +18,17 @@ const emit = defineEmits<{
 const containerRef = ref<HTMLElement | null>(null)
 const recentlyClosed = ref<chrome.sessions.Session[]>([])
 const historyItems = ref<chrome.history.HistoryItem[]>([])
+let loadSeq = 0
 
 async function load() {
+  const seq = ++loadSeq
   const q = props.query.trim()
   const startTime = historyStartTime(props.historyDays)
   const [sessions, hist] = await Promise.all([
     chrome.sessions.getRecentlyClosed({ maxResults: 10 }).catch(() => []),
     chrome.history.search({ text: q, maxResults: 80, startTime }),
   ])
+  if (seq !== loadSeq) return
   recentlyClosed.value = sessions
   historyItems.value = q
     ? rankSearchItems(hist, q, h => ({
@@ -67,6 +70,16 @@ async function restoreSession(sessionId?: string) {
   await load()
 }
 
+function shortHost(rawUrl?: string): string {
+  if (!rawUrl) return ''
+  try {
+    const u = new URL(rawUrl)
+    return u.protocol === 'http:' || u.protocol === 'https:' ? u.hostname.replace(/^www\./, '') : ''
+  } catch {
+    return ''
+  }
+}
+
 function formatTime(ms?: number): string {
   if (!ms) return ''
   return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -79,11 +92,14 @@ onMounted(load)
 <template>
   <div ref="containerRef" class="list-view">
     <template v-if="!query.trim() && recentlyClosed.length">
-      <div class="section-label">Recently Closed</div>
+      <div class="section-label">
+        <span>Recently closed</span>
+        <span class="section-count">{{ recentlyClosed.length }}</span>
+      </div>
       <div
         v-for="(s, idx) in recentlyClosed"
         :key="s.tab?.sessionId || s.window?.sessionId || idx"
-        class="row"
+        class="row closed-row"
         @click="restoreSession(s.tab?.sessionId || s.window?.sessionId)"
         @contextmenu.prevent="emit('sessionContextMenu', s, $event)"
       >
@@ -93,15 +109,33 @@ onMounted(load)
           :src="getChromeFaviconUrl(s.tab.url, 32)"
           alt=""
         />
-        <span v-else class="win-icon">🪟</span>
+        <svg v-else class="win-icon" viewBox="0 0 16 16" aria-hidden="true">
+          <rect
+            x="2"
+            y="3"
+            width="12"
+            height="10"
+            rx="2"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.45"
+          />
+          <path d="M2 6h12" fill="none" stroke="currentColor" stroke-width="1.35" />
+        </svg>
         <span class="title">
           {{ s.tab ? s.tab.title || s.tab.url : `Window (${s.window?.tabs?.length ?? 0} tabs)` }}
         </span>
+        <span class="reopen-pill">Reopen</span>
       </div>
     </template>
 
-    <div class="section-label">History</div>
-    <div v-if="historyItems.length === 0" class="empty">No history entries found.</div>
+    <div class="section-label">
+      <span>{{ query.trim() ? 'Matching history' : 'Browsing history' }}</span>
+      <span v-if="historyItems.length" class="section-count">{{ historyItems.length }}</span>
+    </div>
+    <div v-if="historyItems.length === 0" class="empty">
+      {{ query.trim() ? `No history matches “${query.trim()}”.` : 'No recent history entries.' }}
+    </div>
     <div
       v-for="(item, idx) in historyItems"
       :key="item.id"
@@ -115,6 +149,7 @@ onMounted(load)
     >
       <img class="fav" :src="getChromeFaviconUrl(item.url, 32)" alt="" />
       <span class="title">{{ item.title || item.url }}</span>
+      <span v-if="shortHost(item.url)" class="host">{{ shortHost(item.url) }}</span>
       <span class="time">{{ formatTime(item.lastVisitTime) }}</span>
     </div>
   </div>
@@ -128,23 +163,33 @@ onMounted(load)
 }
 
 .section-label {
-  padding: 8px 10px 4px;
-  font-size: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 12px 4px;
+  font-size: 11.5px;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   color: var(--text-muted);
+}
+
+.section-count {
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
 }
 
 .row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   height: var(--tab-h);
-  padding: 0 8px;
-  margin: 1px 4px;
-  border-radius: 6px;
+  padding: 0 9px;
+  margin: 1px 6px;
+  border-radius: 7px;
   cursor: pointer;
+  user-select: none;
+  transition: background-color 0.1s ease;
 }
 
 .row:hover {
@@ -165,7 +210,9 @@ onMounted(load)
 }
 
 .win-icon {
-  font-size: 13px;
+  width: var(--icon-size);
+  height: var(--icon-size);
+  color: var(--accent);
   flex-shrink: 0;
 }
 
@@ -177,15 +224,43 @@ onMounted(load)
   white-space: nowrap;
 }
 
+.reopen-pill {
+  opacity: 0;
+  font-size: 10.5px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 99px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  flex-shrink: 0;
+  transition: opacity 0.1s ease;
+}
+
+.closed-row:hover .reopen-pill {
+  opacity: 1;
+}
+
+.host {
+  font-size: 11px;
+  color: var(--text-muted);
+  max-width: 105px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .time {
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
   color: var(--text-muted);
   flex-shrink: 0;
 }
 
 .empty {
-  padding: 24px 16px;
+  padding: 30px 16px;
   text-align: center;
   color: var(--text-muted);
+  font-size: 12.5px;
 }
 </style>
