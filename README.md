@@ -48,9 +48,13 @@
 - **Backup & Import**: Export and restore VBerry backups anytime — or import existing backups and snapshots from [Sidebery](https://github.com/mbnuqw/sidebery) with colors, auto-sorting rules, settings, and custom CSS preserved.
 
 <p align="center">
-  <img src="./docs/screenshots/welcome.png" alt="VBerry Welcome Guide" width="420" />
+  <img src="./docs/screenshots/welcome.png" alt="VBerry Welcome Guide" width="380" />
   &nbsp;&nbsp;
-  <img src="./docs/screenshots/settings.png" alt="VBerry Settings" width="420" />
+  <img src="./docs/screenshots/settings.png" alt="VBerry Theme Gallery & Color Studio" width="440" />
+</p>
+
+<p align="center">
+  <img src="./docs/screenshots/sync.png" alt="VBerry Account Sync (Chrome & Vivaldi)" width="540" />
 </p>
 
 ---
